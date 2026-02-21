@@ -1,0 +1,180 @@
+Moyasar Platform API
+Moyasar Platform API allows trusted partners to create and activate new merchants within the Moyasar Payment Gateway without the need for human interaction.
+
+Versions
+1.0: Initial Version
+2.0: Simplified On-Boarding Process
+Removed check from merchant
+Added reasons to indicate the rejection reasons.
+Added Transfers endpoint to the postman collection
+Added Balance to the postman collection
+Added balance_transferred webhook event to entity.
+Added balance_transferred webhook event to platform.
+Removed merchant_balance_transferred and platform_balance_transferred from webhook events for platform.
+3.0: Nafath Signing
+Terminology
+Platform
+A platform is Moyasar partner that has access to the API and can register merchants.
+
+Merchant
+A merchant is a client for the Platform.
+
+Entity
+Each merchant has an associated entity, and in turn each entity has a Live Account and a Test Account.
+
+For simplicity, merchant = entity and entity - merchant.
+
+Live Account
+A live account is the account used for actual (real) transactions.
+
+API keys for the live account start with pk_live_ and sk_live.
+
+Test Account
+A test account is the account used for test transactions and no charges are made to any account.
+
+API keys for the live account start with pk_test_ and sk_test.
+
+Document
+A document is a legal file or identification used to support the merchant during checks.
+
+Expectations
+Moyasar expects the platform to do its due diligence and ensure a merchant is eligible for the service before creating or submitting any document to Moyasar.
+
+To ensure quick and easy on-boarding process, you are required to upload all required information, too many bad merchants can result in delays in checks and response.
+
+Create a Merchant
+To create (register) a merchant within the Moyasar Payment Gateway you need to provide the following information through the platform API:
+
+Field	Description	Required?	Possible Values
+type	Type of the Merchant.	✅	freelancer, establishment, company, foreign_company
+admin_email	Administrator email that will be automatically invited to access https://dashboard.moyasar.com.	✅	A valid email address
+owners_count	The number of owners as appears in the Commercial Registration. This will be used to determine the number of required Owner ID (national ID or Iqama) and the required number of National Addresses.	✅	Interger greater than or equal to 1
+signatory	The authorized signatory type, this is required to determine who is authorized to sign the contract.	✅	owner, commercial_contract, power_of_attorney
+signatory_count	The number of people authorized to sign, only needed when signatory is commercial_contract or power_of_attorney.	✳️	Interger greater than or equal to 1
+activity_license_required	An indication of if a special license is required to operate the business (dictated by Commercial Registration).	✅	true or false
+name	Machine friendly merchant name, for internal uses only.	✅	Alpha-Numeric and Underscores
+public_name	Human friendly name used in display.	✅	Any Text
+country	Merchant country, e.g. "SA".	✅	ISO-3166 alpha 2 code.
+time_zone	A valid timezone identifier, e.g. Asia/Riyadh.	✅	Valid timezone identifier.
+website	The merchants website.	✅	URL
+email	The merchants email (info or support).	✅	Email
+enabled_schemes	A list of enabled payment schemes, i.e. MADA, Visa, or MasterCard.	✅	Array (list) with a combination of mada, visa and/or master.
+fees	Fee matrix for this client, please see the following table.	✅	Object (Hash).
+Fee Matrix Definition
+This is how you will define fees for your merchants.
+
+Field	Description	Example
+tax_inclusive	Indicate if fees are tax inclusive.	true
+mada_charge_rate	Fee rate (percentage) for Mada transactions.	1.70
+mada_charge_fixed	Fixed fee for Mada transactions.	1.00
+mada_refund_rate	Refund rate (percentage) for Mada transactions.	0.00
+mada_refund_fixed	Fixed refund fee (percentage) for Mada transactions.	1.00
+cc_charge_rate	Fee rate (percentage) for Credit Card transactions.	2.70
+cc_charge_fixed	Fixed fee for Credit Card transactions.	1.00
+cc_refund_rate	Refund rate (percentage) for Credit Card transactions.	0.00
+cc_refund_fixed	Fixed refund fee (percentage) for Credit Card transactions.	1.00
+Fee Calculation
+Let us take an example of SAR148.00 and see how fees are calculated for credit card according to the table above:
+
+Calculate: 148.00 * (2.7 / 100) = 3.996
+We will do a Half-Up Rounding and get 4.00
+Now we add the fixed fee of SAR1.00 and get 5.00
+If tax_inclusive is true, then we are done and our final fee is SAR5.00
+If tax_inclusive is false, then we need to get our tax by 5.00 * (15 / 100) = 0.75 and a final fee of 5.75
+Provide Merchant Docs
+Depending on the merchant type, the system will need to do farious checks to finalize the on-baording process, each check has a set of required documents. Please make a test to the system and see what checks are required with every merchant type.
+
+You can learn more about checks in the Checks document.
+
+Update Merchant Info
+Note: please checkout the Postman collection for more info.
+
+To update a merchants info make a put request with the information you need updated.
+
+Here is an example where we update the name and public_name fields for a merchant:
+
+PUT /v1/merchants/88df1418-0290-4563-95c9-4a48eb03987a HTTP/1.1
+Host: apimig.moyasar.com
+Authorization: Basic <your_api_key_as_basic_base64>
+Content-Type: application/json
+
+{
+    "name": "Dutch LLC.",
+    "public_name": "Happy Bee"
+}
+
+Update Merchant Fees
+Fees can be updated using the same merchant update endpoint:
+
+PUT /v1/merchants/88df1418-0290-4563-95c9-4a48eb03987a HTTP/1.1
+Host: apimig.moyasar.com
+Authorization: Basic <your_api_key_as_basic_base64>
+Content-Type: application/json
+
+{
+    "fees": {
+        "tax_inclusive": true,
+        "mada_charge_rate": 1.7,
+        "mada_charge_fixed": 1.0,
+        "mada_refund_rate": 0.0,
+        "mada_refund_fixed": 1.0,
+        "cc_charge_rate": 2.7,
+        "cc_charge_fixed": 1.0,
+        "cc_refund_rate": 0.0,
+        "cc_refund_fixed": 1.0
+    }
+}
+
+Update Merchant Documents
+When a merchant is created, you MUST check the required_documents key to determine what documents need to be uploaded. To upload a document, you need to provide some info and the supporting file. Here is an example of the Bank IBAN:
+
+POST /v1/merchants/88df1418-0290-4563-95c9-4a48eb03987a/documents HTTP/1.1
+Host: apimig.moyasar.com
+Authorization: Basic <your_api_key_as_basic_base64>
+Content-Type: application/json
+Content-Length: 200
+
+{
+    "type": "bank_iban_certificate",
+    "info": {
+        "holder": "Dutch van der Linde",
+        "iban": "SA9880000000000000012345"
+    },
+    "file": "data:text/plain;base64,SGlpaWkg8J+RiyE="
+}
+
+Each document has different info required, you can learn more here at Documents.
+
+Missing Documents Status
+When the on-boarding team at Moyasar find an issue with the merchants documents or information during the auditing process they will switch the merchant status to missing_docs.
+
+In this status, you are required to update or provide missing information by deleting old files and providing new ones and updating the merchant information when required.
+
+When fetching the merchant information through the API, a key named reasons will hold one or more of the pre-defined reasons found in "rejection-reasons" document.
+
+Merchant Rejection
+When a merchant is deemed un-fit for the service, Moyasar will disable payment processing and set the status to rejected.
+
+When fetching the merchant information through the API, a key named reasons will hold one or more of the pre-defined reasons found in "rejection-reasons" document.
+
+Merchant Hold
+Moyasar can stop transfers at any time for a particular merchant by setting the status to hold.
+
+Merchant transfers are usually held due to an on-going fraud investigation or a chargeback claim.
+
+Deactivate a Merchant
+To be added soon.
+
+Register Apple Pay Domains
+To automatically activate Apple Pay, Moyasar has partnered with Apple to provide the easy to use Web Registration API. You can register a domain and activate it through the Platform API.
+
+You can learn more by checking out the attached Postman collection.
+
+Please note that you need to upload the association file (found it /v1/merchants/:merchant_id/domains/verification_file) to the merchant website it:
+
+https://example-merchant-shop.com/.well-known/apple-developer-merchantid-domain-association
+
+Please note that there is no .txt extension at the end of the URL.
+
+Also note that the file is the same for all merchant at the moment.
+

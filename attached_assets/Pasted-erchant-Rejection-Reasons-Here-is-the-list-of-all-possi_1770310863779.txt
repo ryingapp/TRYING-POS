@@ -1,0 +1,52 @@
+erchant Rejection Reasons
+Here is the list of all possible rejection reasons:
+
+Error Type	English Description	Arabic Description
+commercial_registration_missing	Missing commercial registration document.	لم يتم رفع ملف السجل التجاري
+commercial_registration_unclear	Unclear photocopy of the commercial registration document.	صورة غير واضحة من السجل التجاري
+commercial_registration_expired	Expired commercial registration document.	السجل التجاري منتهي الصلاحية
+commercial_contract_missing	Commercial contract is missing.	لم يتم رفع ملف عقد التأسيس
+commercial_contract_unclear	Unclear photocopy of the commercial contract document.	صورة غير واضحة من عقد التأسيس
+commercial_contract_expired	Expired commercial registration document.	عقد تأسيس منتهي الصلاحية
+freelance_certificate_missing	Feelance certificate is missing.	لم يتم رفع شهادة العمل الحر
+freelance_certificate_unclear	Unclear photocopy of the feelance certificate document.	شهادة العمل الحر غير واضحة
+freelance_certificate_expired	Expired feelance certificate.	شهادة عمل حر منتهية الصلاحية
+bank_account_not_matching	Bank account holder does does not match or is not related to the merchant.	حساب البنكي غير متطابق مع معلومات التاجر
+bank_account_invalid	Bank account included is invalid.	حساب بنكي غير صحيح
+bank_account_missing	Bank account is missing.	لم يتم رفع بيانات الحساب البنكي
+power_of_attorney_doc_missing	Power of Attorney document is missing.	لم يتم رفع صك الوكالة
+power_of_attorney_doc_unclear	Unclear photocopy of the Power of Attorney document.	صك الوكالة غير واضح
+power_of_attorney_doc_invalid	Power of Attorney document is invalid.	صك وكالة غير صحيح
+power_of_attorney_id_missing	Power of Attorney Nationa/Iqama ID is missing.	لم يتم رفع هوية الوكيل
+power_of_attorney_id_unclear	The photocopy of Power of Attorney National/Iqama ID is unclear.	هوية الوكيل غير واضحة
+power_of_attorney_id_invalid	Power of Attorney Nationa/Iqama ID is invalid.	هوية الوكيل غير صحيحة
+vat_certificate_missing	VAT certificate is missing.	
+vat_certificate_unclear	VAT certificate photocopy is unclear.	
+vat_certificate_invalid	VAT certificate is invalid.	
+vat_certificate_not_matching	VAT certificate does not match, or is unrelated to the merchant.	
+authorized_signatory_id_missing	Authorized Signatory ID is missing.	
+authorized_signatory_id_unclear	Authorized Signatory ID photocopy is unclear.	
+authorized_signatory_id_invalid	Authorized Signatory ID is invalid.	
+authorized_signatory_id_not_matching	Authorized Signatory ID does not match, or is unrelated to the merchant.	
+owner_id_missing	Owner Nationl/Iqama ID is missing.	
+owner_id_unclear	Owner Nationl/Iqama ID photocopy is unclear.	
+owner_id_invalid	Owner Nationl/Iqama ID is invalid.	
+owner_id_not_matching	Owner Nationl/Iqama ID does not match, or is unrelated to the merchant.	
+memorandum_of_association_missing	Memorandum of Association is missing.	
+memorandum_of_association_unclear	Memorandum of Association photocopy is unclear.	
+memorandum_of_association_invalid	Memorandum of Association is invalid.	
+memorandum_of_association_not_matching	Memorandum of Association does not match, or is unrelated to the merchant.	
+activity_license_missing	Activity License is missing.	
+activity_license_unclear	Activity License photocopy is unclear.	
+activity_license_invalid	Activity License is invalid.	
+activity_license_not_matching	Activity License does not match, or is unrelated to the merchant.	
+app_activity_not_matching_cr	Application/Website activity does not match the Commercial Registration.	
+app_missing_product_prices	Application/Website does not show product or services prices.	
+app_missing_product_description	Application/Website does not show product or services descriptions.	
+app_missing_contact_section	Application/Website does not have contact information.	
+app_missing_arabic_version	Application/Website does not have an Arabic version.	
+app_missing_refund_policy	Application/Website missing refund policy.	
+app_missing_return_policy	Application/Website missing return policy.	
+app_missing_terms_of_use	Application/Website missing terms of use.	
+app_not_working	Application/Website not working.	
+app_under_development	Application/Website under development.

@@ -1,0 +1,17 @@
+ocumentation Types
+This document list and describes all document types needed to activate a certain type of merchants.
+
+Type	Fields	Requires File?	Description	Merchant Types	Max Uploads
+power_of_attorney	number	Yes	Power of Attorney issued by the Ministry of Justice that gives a person the ability to sign on documents.	Required when signatory is set to power_of_attorney	1
+signatory_address	name, street, district, building_number, secondary_number, postal_code, city, country	Yes	Official Proof of National Address for the authorized signatory.	Required when signatory is set to power_of_attorney or commercial_registration	Up to owner count
+signatory_id	id, date_of_birth	Optional	National/IQAMA ID of the authorized signatory.	Required when signatory is set to power_of_attorney or commercial_registration	Up to owner count
+vat_certificate	number	Yes	VAT certificate if the business is required to pay taxes by law. The name must match the one in Commercial Registration.	merchants	1
+activity_license	number	Yes	Activity License. Needed when the activity in CR requires one.	Required when activity_license_required is set to true	No Limit
+bank_iban_certificate	holder, iban	true	Official Bank IBAN Certificate	All	1
+commercial_registration	number	true	Commercial Registration for the merchant business.	establishment, company, foreign_company	1
+company_address	name, street, district, building_number, secondary_number, postal_code, city, country	true	Official Proof of National Address for the merchant business.	establishment, company, foreign_company	1
+freelance_certificate	number, expiry_date	true	Freelance Certificate	Freelancer	1
+investment_license	number, expiry_date	true	Investment License issued by the Ministry of Investment	company, foreign_company	1
+owner_address	name, street, district, building_number, secondary_number, postal_code, city, country	true	Official Proof of National Address for the business owner.	All	Up to signatory count
+owner_id	id, date_of_birth	false	National/IQAMA ID of the business owner	All	Up to signatory count
+other		true	Additional supporting files	All	N

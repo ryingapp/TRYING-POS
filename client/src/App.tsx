@@ -1,0 +1,164 @@
+import { Switch, Route, useLocation, Redirect } from "wouter";
+import { queryClient } from "./lib/queryClient";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { SidebarProvider } from "@/components/ui/sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
+import { Header } from "@/components/header";
+import { ThemeProvider } from "@/lib/theme";
+import { LanguageProvider, useLanguage } from "@/lib/i18n";
+import { BranchProvider } from "@/lib/branch";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import Dashboard from "@/pages/dashboard";
+import MenuPage from "@/pages/menu";
+import OrdersPage from "@/pages/orders";
+import TablesPage from "@/pages/tables";
+import SettingsPage from "@/pages/settings";
+import POSPage from "@/pages/pos";
+import KitchenPage from "@/pages/kitchen";
+import KitchenSectionsPage from "@/pages/kitchen-sections";
+import QRCodesPage from "@/pages/qr-codes";
+import InventoryPage from "@/pages/inventory";
+import ReportsPage from "@/pages/reports";
+import PromotionsPage from "@/pages/promotions";
+import CustomersPage from "@/pages/customers";
+import CustomerMenuPage from "@/pages/customer-menu";
+import MenuItemDetailPage from "@/pages/menu-item-detail";
+import PublicLandingPage from "@/pages/public-landing";
+import PublicReservePage from "@/pages/public-reserve";
+import PublicQueuePage from "@/pages/public-queue";
+import OrderStatusPage from "@/pages/order-status";
+import PaymentPage from "@/pages/payment";
+import PaymentCallbackPage from "@/pages/payment-callback";
+import ReservationPaymentCallbackPage from "@/pages/reservation-payment-callback";
+import LoginPage from "@/pages/login";
+import RegisterPage from "@/pages/register";
+import PlatformAdminPage from "@/pages/platform-admin";
+import ReservationsPage from "@/pages/reservations";
+import DaySessionPage from "@/pages/day-session";
+import CustomizationsPage from "@/pages/customizations";
+import QueuePage from "@/pages/queue";
+import NotFound from "@/pages/not-found";
+
+function AdminLayout() {
+  const { direction } = useLanguage();
+  
+  const style = {
+    "--sidebar-width": "16rem",
+    "--sidebar-width-icon": "3rem",
+  };
+
+  return (
+    <SidebarProvider style={style as React.CSSProperties}>
+      <div className={`flex h-screen w-full ${direction === "rtl" ? "flex-row-reverse" : ""}`} dir={direction}>
+        <AppSidebar />
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <Header />
+          <main className="flex-1 overflow-auto">
+            <Switch>
+              <Route path="/" component={Dashboard} />
+              <Route path="/pos" component={POSPage} />
+              <Route path="/kitchen" component={KitchenPage} />
+              <Route path="/kitchen-sections" component={KitchenSectionsPage} />
+              <Route path="/menu" component={MenuPage} />
+              <Route path="/orders" component={OrdersPage} />
+              <Route path="/tables" component={TablesPage} />
+              <Route path="/qr-codes" component={QRCodesPage} />
+              <Route path="/inventory" component={InventoryPage} />
+              <Route path="/reports" component={ReportsPage} />
+              <Route path="/customers" component={CustomersPage} />
+              <Route path="/promotions" component={PromotionsPage} />
+              <Route path="/reservations" component={ReservationsPage} />
+              <Route path="/queue" component={QueuePage} />
+              <Route path="/day-session" component={DaySessionPage} />
+              <Route path="/customizations" component={CustomizationsPage} />
+              <Route path="/settings" component={SettingsPage} />
+              <Route component={NotFound} />
+            </Switch>
+          </main>
+        </div>
+      </div>
+    </SidebarProvider>
+  );
+}
+
+function AppRouter() {
+  const [location] = useLocation();
+  const { isAuthenticated, user } = useAuth();
+  
+  const isCustomerRoute = location === "/order" || 
+    location.startsWith("/order/") || 
+    location.startsWith("/order-status/") ||
+    location.match(/^\/m\/[^/]+\/order-status\//) ||
+    location.startsWith("/payment/") ||
+    location.startsWith("/payment-callback/") ||
+    location.startsWith("/m/") ||
+    location.match(/^\/m\/[^/]+\/reservation-payment\//);
+
+  const isAuthRoute = location === "/login" || location === "/register";
+
+  if (isCustomerRoute) {
+    return (
+      <Switch>
+        <Route path="/m/:restaurantId/menu" component={CustomerMenuPage} />
+        <Route path="/m/:restaurantId/item/:itemId" component={MenuItemDetailPage} />
+        <Route path="/m/:restaurantId/reserve" component={PublicReservePage} />
+        <Route path="/m/:restaurantId/reservation-payment/:reservationId" component={ReservationPaymentCallbackPage} />
+        <Route path="/m/:restaurantId/queue" component={PublicQueuePage} />
+        <Route path="/m/:restaurantId/order-status/:orderId" component={OrderStatusPage} />
+        <Route path="/m/:restaurantId/table/:tableId" component={CustomerMenuPage} />
+        <Route path="/m/:restaurantId/:tableId" component={CustomerMenuPage} />
+        <Route path="/m/:restaurantId" component={PublicLandingPage} />
+        <Route path="/order/:tableId?" component={CustomerMenuPage} />
+        <Route path="/order-status/:orderId" component={OrderStatusPage} />
+        <Route path="/payment/:orderId" component={PaymentPage} />
+        <Route path="/payment-callback/:orderId" component={PaymentCallbackPage} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+
+  if (isAuthRoute) {
+    if (isAuthenticated && location === "/login") {
+      return <Redirect to="/" />;
+    }
+    return (
+      <Switch>
+        <Route path="/login" component={LoginPage} />
+        <Route path="/register" component={RegisterPage} />
+      </Switch>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Redirect to="/login" />;
+  }
+
+  if (user?.role === "platform_admin") {
+    return <PlatformAdminPage />;
+  }
+  
+  return <AdminLayout />;
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <BranchProvider>
+              <TooltipProvider>
+                <AppRouter />
+                <Toaster />
+              </TooltipProvider>
+            </BranchProvider>
+          </AuthProvider>
+        </LanguageProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
