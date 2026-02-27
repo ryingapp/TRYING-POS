@@ -281,6 +281,7 @@ export default function OrdersPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [period, setPeriod] = useState<"today" | "week" | "archived" | "all">("today");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [cardSize, setCardSize] = useState<"normal" | "compact" | "large">("normal");
   const [printOrderId, setPrintOrderId] = useState<string | null>(null);
@@ -297,9 +298,11 @@ export default function OrdersPage() {
   const [cancelReason, setCancelReason] = useState("");
 
   const { data: orders, isLoading: ordersLoading } = useQuery<Order[]>({
-    queryKey: ["/api/orders", { branch: selectedBranchId }],
+    queryKey: ["/api/orders", { branch: selectedBranchId, period }],
     queryFn: async () => {
-      const url = selectedBranchId ? `/api/orders?branch=${selectedBranchId}` : "/api/orders";
+      const url = selectedBranchId 
+        ? `/api/orders?branch=${selectedBranchId}&period=${period}` 
+        : `/api/orders?period=${period}`;
       const res = await apiRequest("GET", url);
       return res.json();
     },
@@ -625,6 +628,50 @@ export default function OrdersPage() {
             <Maximize2 className="h-4 w-4" />
           </Button>
         </div>
+      </div>
+
+      {/* Period tabs - Today / Week / Archive */}
+      <div className="flex gap-2 border-b">
+        <button
+          onClick={() => setPeriod("today")}
+          className={`px-4 py-2 font-medium border-b-2 ${
+            period === "today"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {isRtl ? "اليوم" : "Today"}
+        </button>
+        <button
+          onClick={() => setPeriod("week")}
+          className={`px-4 py-2 font-medium border-b-2 ${
+            period === "week"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {isRtl ? "الأسبوع الماضي" : "Last Week"}
+        </button>
+        <button
+          onClick={() => setPeriod("archived")}
+          className={`px-4 py-2 font-medium border-b-2 ${
+            period === "archived"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {isRtl ? "مؤرشفة" : "Archived"}
+        </button>
+        <button
+          onClick={() => setPeriod("all")}
+          className={`px-4 py-2 font-medium border-b-2 ${
+            period === "all"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {isRtl ? "الكل" : "All"}
+        </button>
       </div>
 
       {ordersLoading ? (

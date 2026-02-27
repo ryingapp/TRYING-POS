@@ -35,6 +35,13 @@ const STATUS_TABS = [
   { key: 'cancelled', label: 'ملغي' },
 ];
 
+const PERIOD_TABS = [
+  { key: 'today', label: 'اليوم' },
+  { key: 'week', label: 'الأسبوع الماضي' },
+  { key: 'archived', label: 'مؤرشفة' },
+  { key: 'all', label: 'الكل' },
+];
+
 export default function OrdersScreen() {
   const insets = useSafeAreaInsets();
   const { branch } = useAuth();
@@ -44,6 +51,7 @@ export default function OrdersScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState('all');
+  const [activePeriod, setActivePeriod] = useState<'today' | 'week' | 'archived' | 'all'>('today');
   const [cancelOrderId, setCancelOrderId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   // Receipt: store the full order so local (unsynced) orders can show offline receipt
@@ -88,7 +96,7 @@ export default function OrdersScreen() {
 
       if (isOnline) {
         try {
-          data = await api.getOrders(branch?.id);
+          data = await api.getOrders(branch?.id, activePeriod);
           data = await enrichOrdersWithItems(data);
           // Save to local DB in background
           for (const order of data.slice(0, 50)) {
@@ -108,7 +116,7 @@ export default function OrdersScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isOnline, branch, enrichOrdersWithItems]);
+  }, [isOnline, branch, activePeriod, enrichOrdersWithItems]);
 
   useEffect(() => {
     loadOrders();
@@ -276,6 +284,25 @@ export default function OrdersScreen() {
       </View>
 
       <SyncBar />
+
+      {/* Period Tabs (Today / Week / Archived / All) */}
+      <View style={styles.periodTabsContainer}>
+        {PERIOD_TABS.map((tab) => {
+          const isActive = activePeriod === tab.key;
+          return (
+            <TouchableOpacity
+              key={tab.key}
+              style={[styles.periodTab, isActive && styles.periodTabActive]}
+              onPress={() => setActivePeriod(tab.key as any)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.periodTabText, isActive && styles.periodTabTextActive]}>
+                {tab.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
 
       {/* Status Tabs */}
       <View style={styles.tabsContainer}>
@@ -661,5 +688,33 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
     fontSize: 15,
+  },
+  periodTabsContainer: {
+    backgroundColor: COLORS.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
+  periodTab: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginRight: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  periodTabActive: {
+    borderBottomColor: COLORS.primary,
+  },
+  periodTabText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textLight,
+  },
+  periodTabTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
   },
 });

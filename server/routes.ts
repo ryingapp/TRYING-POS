@@ -2304,7 +2304,40 @@ export async function registerRoutes(
   app.get("/api/orders", async (req, res) => {
     try {
       const branchId = req.query.branch as string | undefined;
-      const orders = await storage.getOrders(await getRestaurantId(req), branchId);
+      const period = (req.query.period as string) || "today"; // today, week, archived, all
+      
+      let orders = await storage.getOrders(await getRestaurantId(req), branchId);
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+      
+      // Filter by period
+      switch (period) {
+        case "today": {
+          orders = orders.filter(o => {
+            const orderDate = new Date(o.createdAt);
+            const orderDateOnly = new Date(orderDate.getFullYear(), orderDate.getMonth(), orderDate.getDate());
+            return orderDateOnly.getTime() === today.getTime();
+          });
+          break;
+        }
+        case "week": {
+          orders = orders.filter(o => {
+            const orderDate = new Date(o.createdAt);
+            const orderDateOnly = new Date(orderDate.getFullYear(), orderDate.getMonth(), orderDate.getDate());
+            return orderDateOnly.getTime() >= weekAgo.getTime() && orderDateOnly.getTime() < today.getTime();
+          });
+          break;
+        }
+        case "archived": {
+          orders = orders.filter(o => (o as any).isArchived === true);
+          break;
+        }
+        case "all":
+        default:
+          // No filter
+          break;
+      }
       
       // Include items for each order
       const ordersWithItems = await Promise.all(
@@ -8769,6 +8802,101 @@ export async function registerRoutes(
       res.json({ success: true, message: "Webhooks registered successfully" });
     } catch (error: any) {
       handleRouteError(res, error, "Failed to register Jahez webhooks");
+    }
+  });
+
+  // Day Sessions - Track daily operations
+  app.get("/api/day-sessions", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const sessions = await storage.getDaySessions(restaurantId, branchId);
+      res.json(sessions);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get day sessions" });
+    }
+  });
+
+  app.get("/api/day-sessions/current", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const session = await storage.getCurrentDaySession(restaurantId, branchId);
+      res.json(session || { error: "No active session" });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get current day session" });
+    }
+  });
+
+  app.post("/api/day-sessions", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const user = await getAuthenticatedUser(req);
+
+      // Check if already open today
+      const existing = await storage.getCurrentDaySession(restaurantId, branchId);
+      if (existing && !existing.isClosed) {
+        return res.status(409).json({ error: "A day session is already open today", session: existing });
+      }
+
+      const session = await storage.openDaySession({
+        restaurantId,
+        branchId: branchId || undefined,
+        sessionDate: new Date(),
+      });
+
+      res.status(201).json(session);
+    } catch (error: any) {
+      res.status(400).json({ error: "Failed to open day session", details: error?.message });
+    }
+  });
+
+  app.put("/api/day-sessions/:id/close", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const user = await getAuthenticatedUser(req);
+      const { notes } = req.body;
+
+      const session = await storage.getDaySession(req.params.id);
+      if (!session || session.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Day session not found" });
+      }
+
+      // Archive all open orders from this session
+      if (!session.isClosed) {
+        const orders = await storage.getOrders(restaurantId, session.branchId);
+        const today = new Date();
+        const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+        for (const order of orders) {
+          const orderDate = new Date(order.createdAt);
+          const orderDateOnly = new Date(orderDate.getFullYear(), orderDate.getMonth(), orderDate.getDate());
+
+          // Only archive orders from this day session
+          if (orderDateOnly.getTime() === todayOnly.getTime()) {
+            try {
+              // Mark as archived in orders table
+              await db
+                .update(orders as any)
+                .set({ isArchived: true })
+                .where(eq((orders as any).id, order.id))
+                .execute();
+            } catch (e) {
+              console.error(`Failed to archive order ${order.id}:`, e);
+            }
+          }
+        }
+      }
+
+      const closed = await storage.closeDaySession(req.params.id, {
+        closedBy: user.name || user.email,
+        notes,
+      });
+
+      res.json(closed);
+    } catch (error: any) {
+      res.status(400).json({ error: "Failed to close day session", details: error?.message });
     }
   });
 

@@ -73,8 +73,8 @@ class ApiService {
     return this.request(ENDPOINTS.menuItems);
   }
 
-  async getOrders(branchId?: string): Promise<Order[]> {
-    const params = branchId ? `?branch=${branchId}` : '';
+  async getOrders(branchId?: string, period: string = 'today'): Promise<Order[]> {
+    const params = branchId ? `?branch=${branchId}&period=${period}` : `?period=${period}`;
     return this.request(`${ENDPOINTS.orders}${params}`);
   }
 
