@@ -1027,64 +1027,6 @@ export default function PlatformAdminPage() {
                               </div>
                             </div>
                           )}
-
-                          {/* Recent Orders */}
-                          {restaurant.recentOrders.length > 0 && (
-                            <div>
-                              <p className="text-xs font-medium text-muted-foreground mb-2">
-                                {isAr ? "آخر الطلبات" : "Recent Orders"} ({Math.min(restaurant.recentOrders.length, 10)})
-                              </p>
-                              <div className="overflow-x-auto">
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow>
-                                      <TableHead>{isAr ? "رقم الطلب" : "Order #"}</TableHead>
-                                      <TableHead>{isAr ? "النوع" : "Type"}</TableHead>
-                                      <TableHead>{isAr ? "الحالة" : "Status"}</TableHead>
-                                      <TableHead>{isAr ? "المبلغ" : "Amount"}</TableHead>
-                                      <TableHead>{isAr ? "الدفع" : "Payment"}</TableHead>
-                                      <TableHead>{isAr ? "العميل" : "Customer"}</TableHead>
-                                      <TableHead>{isAr ? "التاريخ" : "Date"}</TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {restaurant.recentOrders.map(order => (
-                                      <TableRow key={order.id}>
-                                        <TableCell className="font-mono text-xs">{order.orderNumber}</TableCell>
-                                        <TableCell>
-                                          <Badge variant="outline" className="text-xs">
-                                            {isAr ? orderTypeLabelsAr[order.orderType] || order.orderType : order.orderType.replace(/_/g, " ")}
-                                          </Badge>
-                                        </TableCell>
-                                        <TableCell>
-                                          <Badge variant={
-                                            order.status === "completed" ? "default" :
-                                            order.status === "cancelled" ? "destructive" : "secondary"
-                                          } className="text-xs">
-                                            {isAr ? statusLabelsAr[order.status] || order.status : order.status}
-                                          </Badge>
-                                        </TableCell>
-                                        <TableCell className="font-semibold">{order.total} {isAr ? "ريال" : "SAR"}</TableCell>
-                                        <TableCell>
-                                          <div className="flex items-center gap-1">
-                                            <span className="text-xs">
-                                              {order.paymentMethod ? (isAr ? paymentMethodLabels[order.paymentMethod]?.ar || order.paymentMethod : paymentMethodLabels[order.paymentMethod]?.en || order.paymentMethod) : "-"}
-                                            </span>
-                                            {order.isPaid && (
-                                              <Badge variant="default" className="text-xs">{isAr ? "مدفوع" : "Paid"}</Badge>
-                                            )}
-                                          </div>
-                                        </TableCell>
-                                        <TableCell className="text-xs text-muted-foreground">{order.customerName || "-"}</TableCell>
-                                        <TableCell className="text-xs text-muted-foreground">{formatDate(order.createdAt)}</TableCell>
-                                      </TableRow>
-                                    ))}
-                                  </TableBody>
-                                </Table>
-                              </div>
-                            </div>
-                          )}
-
                           {restaurant.branches.length > 0 && (
                             <div>
                               <p className="text-xs font-medium text-muted-foreground mb-2">
