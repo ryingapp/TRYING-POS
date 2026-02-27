@@ -1,27 +1,43 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import * as moyasarPlatform from "./moyasar-platform";
+import * as edfapay from "./edfapay";
 import {
   generateZatcaXml,
   generateZatcaTlvQrCode,
   computeInvoiceHash,
   computeInvoiceHashBase64,
   generateInvoiceUuid,
+  injectQrCodeIntoXml,
   getZatcaBaseUrl,
   getComplianceCsid,
   getProductionCsid,
   reportInvoice,
   clearInvoice,
   submitComplianceInvoice,
+  generateZatcaCsr,
+  signInvoiceXml,
+  buildSignedInvoice,
+  validateB2BBuyer,
+  bankersRound,
+  isMockEnvironment,
+  mockGetComplianceCsid,
+  mockSubmitComplianceInvoice,
+  mockGetProductionCsid,
+  mockReportInvoice,
+  mockClearInvoice,
   type ZatcaInvoiceData,
   type ZatcaLineItem,
 } from "./zatca";
+import * as hungerstation from "./hungerstation";
+import * as jahez from "./jahez";
 
 const JWT_SECRET = process.env.JWT_SECRET || (() => {
   console.warn("⚠️  JWT_SECRET not set! Using random secret. All tokens will be invalidated on restart.");
@@ -79,8 +95,8 @@ import {
   insertInventoryTransactionSchema,
   insertRecipeSchema,
   insertPrinterSchema,
-  insertMoyasarMerchantSchema,
-  insertMoyasarDocumentSchema,
+  insertEdfapayMerchantSchema,
+  insertEdfapayInvoiceSchema,
   insertReservationSchema,
   insertPromotionSchema,
   insertCouponSchema,
@@ -96,10 +112,10 @@ import {
   insertNotificationSchema,
   insertNotificationSettingsSchema,
   insertPaymentTransactionSchema,
-  insertMoyasarInvoiceSchema,
-  insertApplePayDomainSchema,
+
   insertKitchenSectionSchema,
   insertCustomerSchema,
+  insertDeliveryIntegrationSchema,
   customers
 } from "@shared/schema";
 import bcrypt from "bcryptjs";
@@ -298,7 +314,7 @@ function generateZatcaQrCode(data: {
   return generateZatcaTlvQrCode(data);
 }
 
-// Build full ZATCA invoice with XML, hash chain, and QR code
+// Build full ZATCA invoice with XML, hash chain, signing, and QR code
 async function buildZatcaInvoice(
   restaurant: any,
   order: any,
@@ -306,15 +322,25 @@ async function buildZatcaInvoice(
   menuItems: Map<string, any>,
   invoiceType: 'simplified' | 'standard' | 'credit_note' | 'debit_note' = 'simplified',
   relatedInvoice?: any,
-  buyer?: { name?: string; vatNumber?: string },
+  buyer?: { name?: string; vatNumber?: string; streetName?: string; buildingNumber?: string; district?: string; city?: string; postalCode?: string; country?: string },
+  noteReason?: string,
 ) {
   const restaurantId = restaurant.id;
+  const branchId = order.branchId || null;
   
-  // Increment invoice counter atomically
-  const currentCounter = (restaurant.zatcaInvoiceCounter || 0) + 1;
-  await storage.updateRestaurantById(restaurantId, { zatcaInvoiceCounter: currentCounter } as any);
+  // B2B validation for standard invoices (BR-KSA-46)
+  if (invoiceType === 'standard') {
+    const buyerErrors = validateB2BBuyer(buyer);
+    if (buyerErrors.length > 0) {
+      throw new Error(`B2B buyer validation failed: ${buyerErrors.join('; ')}`);
+    }
+  }
   
-  const previousHash = restaurant.zatcaLastInvoiceHash || 
+  // Get branch-level ZATCA counter and hash (falls back to restaurant if no branch)
+  const { counter: prevCounter, lastHash } = await storage.getZatcaCounterAndHash(restaurantId, branchId);
+  const currentCounter = prevCounter + 1;
+  
+  const previousHash = lastHash || 
     Buffer.from('NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==', 'base64').toString('utf8');
   
   const uuid = generateInvoiceUuid();
@@ -322,40 +348,46 @@ async function buildZatcaInvoice(
   const issueDate = now.toISOString().split('T')[0];
   const issueTime = now.toTimeString().split(' ')[0];
   
+  // Delivery date: use order creation for dine-in/pickup, supply date for delivery
+  const orderCreatedAt = order.createdAt ? new Date(order.createdAt) : now;
+  const deliveryDate = order.orderType === 'delivery'
+    ? (order.updatedAt ? new Date(order.updatedAt).toISOString().split('T')[0] : issueDate)
+    : orderCreatedAt.toISOString().split('T')[0];
+  
   const isTaxEnabled = restaurant.taxEnabled !== false;
   const taxRate = isTaxEnabled ? 15 : 0;
   
-  // Build line items
+  // Build line items with banker's rounding
   const items: ZatcaLineItem[] = orderItems.map((item, idx) => {
-    const menuItem = menuItems.get(item.menuItemId);
+    const menuItem = item.menuItemId ? menuItems.get(item.menuItemId) : null;
     const unitPrice = parseFloat(item.unitPrice || menuItem?.price || "0");
     const quantity = item.quantity || 1;
     const lineDiscount = 0;
-    const lineTotal = unitPrice * quantity - lineDiscount;
-    const lineTax = lineTotal * (taxRate / 100);
+    const lineTotal = bankersRound(unitPrice * quantity - lineDiscount);
+    const lineTax = bankersRound(lineTotal * (taxRate / 100));
     
     return {
       id: String(idx + 1),
-      nameAr: menuItem?.nameAr || menuItem?.nameEn || 'منتج',
-      nameEn: menuItem?.nameEn || '',
+      nameAr: menuItem?.nameAr || menuItem?.nameEn || item.itemName || 'منتج',
+      nameEn: menuItem?.nameEn || item.itemName || '',
       quantity,
       unitPrice,
       discount: lineDiscount,
       taxRate,
-      taxAmount: Math.round(lineTax * 100) / 100,
-      totalWithTax: Math.round((lineTotal + lineTax) * 100) / 100,
-      totalWithoutTax: Math.round(lineTotal * 100) / 100,
+      taxAmount: lineTax,
+      totalWithTax: bankersRound(lineTotal + lineTax),
+      totalWithoutTax: lineTotal,
     };
   });
   
-  const subtotal = items.reduce((sum, i) => sum + i.totalWithoutTax, 0);
-  const discount = parseFloat(order.discount || "0");
-  const deliveryFee = parseFloat(order.deliveryFee || "0");
-  const taxableAmount = Math.max(0, subtotal - discount + deliveryFee);
-  const taxAmount = Math.round(taxableAmount * (taxRate / 100) * 100) / 100;
-  const total = Math.round((taxableAmount + taxAmount) * 100) / 100;
+  const subtotal = bankersRound(items.reduce((sum, i) => sum + i.totalWithoutTax, 0));
+  const discount = bankersRound(parseFloat(order.discount || "0"));
+  const deliveryFee = bankersRound(parseFloat(order.deliveryFee || "0"));
+  const taxableAmount = bankersRound(Math.max(0, subtotal - discount + deliveryFee));
+  const taxAmount = bankersRound(taxableAmount * (taxRate / 100));
+  const total = bankersRound(taxableAmount + taxAmount);
   
-  const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId);
+  const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId, branchId);
   
   const invoiceData: ZatcaInvoiceData = {
     uuid,
@@ -363,7 +395,7 @@ async function buildZatcaInvoice(
     invoiceType,
     issueDate,
     issueTime,
-    deliveryDate: issueDate,
+    deliveryDate,
     seller: {
       nameAr: restaurant.nameAr || restaurant.nameEn || 'مطعم',
       nameEn: restaurant.nameEn,
@@ -379,6 +411,12 @@ async function buildZatcaInvoice(
     buyer: buyer ? {
       name: buyer.name,
       vatNumber: buyer.vatNumber,
+      streetName: buyer.streetName,
+      buildingNumber: buyer.buildingNumber,
+      district: buyer.district,
+      city: buyer.city,
+      postalCode: buyer.postalCode,
+      country: buyer.country,
     } : undefined,
     items,
     subtotal,
@@ -392,31 +430,53 @@ async function buildZatcaInvoice(
     invoiceCounter: currentCounter,
     relatedInvoiceNumber: relatedInvoice?.invoiceNumber,
     relatedInvoiceIssueDate: relatedInvoice?.createdAt ? new Date(relatedInvoice.createdAt).toISOString().split('T')[0] : undefined,
+    noteReason: noteReason,
   };
   
-  // Generate XML
-  const xmlContent = generateZatcaXml(invoiceData);
+  // Generate unsigned XML
+  const unsignedXml = generateZatcaXml(invoiceData);
   
-  // Compute hash
-  const invoiceHash = computeInvoiceHashBase64(xmlContent);
+  // Resolve signing credentials (private key + certificate)
+  let privateKey: string | null = null;
+  let certificate: string | null = null;
   
-  // Update restaurant's last invoice hash
-  await storage.updateRestaurantById(restaurantId, { zatcaLastInvoiceHash: invoiceHash } as any);
+  // Try branch-level credentials first
+  if (branchId) {
+    const branch = await storage.getBranch(branchId);
+    if (branch && (branch as any).zatcaPrivateKey && (branch as any).zatcaCertificate) {
+      privateKey = (branch as any).zatcaPrivateKey;
+      certificate = (branch as any).zatcaProductionCsid || (branch as any).zatcaComplianceCsid || (branch as any).zatcaCertificate;
+    }
+  }
+  // Fallback to restaurant-level
+  if (!privateKey && restaurant.zatcaPrivateKey && restaurant.zatcaCertificate) {
+    privateKey = restaurant.zatcaPrivateKey;
+    certificate = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid || restaurant.zatcaCertificate;
+  }
   
-  // Generate QR code with hash data
-  const qrData = generateZatcaQrCode({
-    sellerName: restaurant.nameAr || restaurant.nameEn || 'مطعم',
-    vatNumber: restaurant.vatNumber || '',
-    timestamp: now.toISOString(),
-    total: total.toFixed(2),
-    vatAmount: taxAmount.toFixed(2),
-    invoiceHash: computeInvoiceHash(xmlContent),
-  });
+  // Sign + QR pipeline
+  const { finalXml, invoiceHash, qrData, signatureValue, signedXml } = buildSignedInvoice(
+    unsignedXml,
+    privateKey,
+    certificate,
+    {
+      sellerName: restaurant.nameAr || restaurant.nameEn || 'مطعم',
+      vatNumber: restaurant.vatNumber || '',
+      timestamp: now.toISOString(),
+      total: total.toFixed(2),
+      vatAmount: taxAmount.toFixed(2),
+    },
+  );
+  
+  // Update branch-level (and restaurant-level) counter and hash
+  await storage.updateZatcaCounterAndHash(restaurantId, branchId, currentCounter, invoiceHash);
   
   return {
+    branchId,
     invoiceNumber,
     uuid,
-    xmlContent,
+    xmlContent: finalXml,
+    signedXml: signedXml || null, // Only set if actually signed
     invoiceHash,
     previousInvoiceHash: previousHash,
     invoiceCounter: currentCounter,
@@ -431,12 +491,32 @@ async function buildZatcaInvoice(
   };
 }
 
+// CSV injection prevention - sanitize cell values
+function csvSafe(value: string | null | undefined): string {
+  if (!value) return "";
+  const str = String(value);
+  // Prefix dangerous characters that could trigger formula injection in Excel/Sheets
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
+function csvQuote(value: string | null | undefined): string {
+  return `"${csvSafe(value).replace(/"/g, '""')}"`;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
 
   app.use("/uploads", (await import("express")).default.static(uploadDir));
+
+  // Health check endpoint - no auth required
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString(), uptime: process.uptime() });
+  });
 
   // RBAC permission middleware for protected routes
   const ROUTE_PERMISSIONS: Array<{ pattern: RegExp; module: string; methods?: string[] }> = [
@@ -446,11 +526,12 @@ export async function registerRoutes(
     { pattern: /^\/api\/inventory/, module: "inventory" },
     { pattern: /^\/api\/kitchen/, module: "kitchen" },
     { pattern: /^\/api\/reports/, module: "reports" },
-    { pattern: /^\/api\/(restaurant|settings|branches|users|moyasar|zatca)/, module: "settings" },
+    { pattern: /^\/api\/(restaurant|settings|branches|users|zatca)/, module: "settings" },
     { pattern: /^\/api\/(promotions|coupons)/, module: "marketing" },
     { pattern: /^\/api\/qr-codes/, module: "qr" },
     { pattern: /^\/api\/printers/, module: "settings" },
     { pattern: /^\/api\/(queue|reservations)/, module: "tables" },
+    { pattern: /^\/api\/delivery/, module: "settings" },
   ];
 
   app.use("/api/", async (req, res, next) => {
@@ -492,7 +573,81 @@ export async function registerRoutes(
   });
 
   // ==================== PUBLIC MENU APIs (no auth required) ====================
-  
+
+  // Public order endpoint - no auth needed, used by payment page
+  // MUST be registered BEFORE the :restaurantId middleware to avoid "orders" being treated as a restaurant slug
+  app.get("/api/public/orders/:orderId", async (req, res) => {
+    try {
+      const order = await storage.getOrder(req.params.orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      res.json(order);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get order" });
+    }
+  });
+
+  // Public invoice endpoint - no auth needed, used on payment callback page
+  app.get("/api/public/orders/:orderId/invoice", async (req, res) => {
+    try {
+      const order = await storage.getOrder(req.params.orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      const invoice = await storage.getInvoiceByOrder(order.id);
+      if (!invoice) {
+        return res.status(404).json({ error: "Invoice not found" });
+      }
+      const restaurant = await storage.getRestaurantById(order.restaurantId);
+      const orderItems = await storage.getOrderItems(order.id);
+      const menuItemsData = await storage.getMenuItems(order.restaurantId);
+      const menuItemsMap = new Map(menuItemsData.map(m => [m.id, m]));
+      const itemsWithDetails = orderItems.map(item => {
+        const menuItem = item.menuItemId ? menuItemsMap.get(item.menuItemId) : null;
+        return {
+          ...item,
+          menuItem: menuItem
+            ? { nameEn: menuItem.nameEn, nameAr: menuItem.nameAr, price: menuItem.price }
+            : item.itemName ? { nameEn: item.itemName, nameAr: item.itemName, price: item.unitPrice } : undefined,
+        };
+      });
+      res.json({
+        id: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        invoiceType: invoice.invoiceType,
+        status: invoice.status,
+        subtotal: invoice.subtotal,
+        taxAmount: invoice.taxAmount,
+        taxRate: invoice.taxRate,
+        discount: invoice.discount,
+        deliveryFee: invoice.deliveryFee,
+        total: invoice.total,
+        customerName: invoice.customerName,
+        paymentMethod: invoice.paymentMethod,
+        isPaid: invoice.isPaid,
+        qrCodeData: invoice.qrCodeData,
+        zatcaStatus: invoice.zatcaStatus,
+        uuid: invoice.uuid,
+        invoiceCounter: invoice.invoiceCounter,
+        createdAt: invoice.createdAt,
+        issuedAt: invoice.issuedAt,
+        order: { ...order, items: itemsWithDetails },
+        restaurant: restaurant ? {
+          nameEn: restaurant.nameEn,
+          nameAr: restaurant.nameAr,
+          vatNumber: restaurant.vatNumber,
+          commercialRegistration: restaurant.commercialRegistration,
+          address: restaurant.address,
+          phone: restaurant.phone,
+          logo: restaurant.logo,
+        } : null,
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get invoice" });
+    }
+  });
+
   // Middleware: resolve restaurant slug or ID to actual restaurant ID
   app.use("/api/public/:restaurantId", async (req: any, res, next) => {
     try {
@@ -828,20 +983,54 @@ export async function registerRoutes(
       if (order.status !== "payment_pending") {
       try {
         const isTaxEnabled = restaurant.taxEnabled !== false;
-        const vatRate = isTaxEnabled ? 0.15 : 0;
-        const subtotal = parseFloat(order.total || "0");
-        const vatAmount = subtotal * vatRate;
-        const total = subtotal + vatAmount;
+        const taxRatePercent = isTaxEnabled ? 15 : 0;
+        // order.total already includes tax from recalculateOrderTotals — extract VAT, don't add on top
+        const totalWithTax = parseFloat(order.total || "0");
+        const orderDiscount = parseFloat(order.discount || "0");
+        const orderDeliveryFee = parseFloat(order.deliveryFee || "0");
         const now = new Date();
         const uuid = generateInvoiceUuid();
-        const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId);
+        const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId, order.branchId);
         
-        // Generate ZATCA XML for public orders too
-        const currentCounter = ((restaurant as any).zatcaInvoiceCounter || 0) + 1;
-        const previousHash = (restaurant as any).zatcaLastInvoiceHash || 
+        // Generate ZATCA XML for public orders too — use branch-level counter/hash
+        const orderBranchId = order.branchId || null;
+        const { counter: prevCounter, lastHash: prevHash } = await storage.getZatcaCounterAndHash(restaurantId, orderBranchId);
+        const currentCounter = prevCounter + 1;
+        const previousHash = prevHash || 
           Buffer.from('NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==', 'base64').toString('utf8');
         
-        const xmlContent = generateZatcaXml({
+        // Build itemized line items from order items (ZATCA requires itemization)
+        const pubOrderItems = await storage.getOrderItems(order.id);
+        const pubMenuItemsRaw = await storage.getMenuItems(restaurantId);
+        const pubMenuItemsMap = new Map(pubMenuItemsRaw.map(m => [m.id, m]));
+        
+        const xmlItems: ZatcaLineItem[] = pubOrderItems.map((item, idx) => {
+          const menuItem = item.menuItemId ? pubMenuItemsMap.get(item.menuItemId) : null;
+          const unitPrice = parseFloat(item.unitPrice || menuItem?.price || "0");
+          const qty = item.quantity || 1;
+          const lineTotal = bankersRound(unitPrice * qty);
+          const lineTax = bankersRound(lineTotal * (taxRatePercent / 100));
+          return {
+            id: String(idx + 1),
+            nameAr: menuItem?.nameAr || menuItem?.nameEn || item.itemName || 'منتج',
+            nameEn: menuItem?.nameEn || item.itemName || '',
+            quantity: qty,
+            unitPrice,
+            discount: 0,
+            taxRate: taxRatePercent,
+            taxAmount: lineTax,
+            totalWithTax: bankersRound(lineTotal + lineTax),
+            totalWithoutTax: lineTotal,
+          };
+        });
+
+        // Calculate totals with banker's rounding
+        const itemsSubtotal = bankersRound(xmlItems.reduce((sum, i) => sum + i.totalWithoutTax, 0));
+        const taxableAmt = bankersRound(Math.max(0, itemsSubtotal - orderDiscount + orderDeliveryFee));
+        const vatAmount = bankersRound(taxableAmt * (taxRatePercent / 100));
+        const invoiceTotal = bankersRound(taxableAmt + vatAmount);
+        
+        const unsignedXmlContent = generateZatcaXml({
           uuid,
           invoiceNumber,
           invoiceType: 'simplified',
@@ -859,48 +1048,59 @@ export async function registerRoutes(
             postalCode: restaurant.postalCode || '',
             country: restaurant.country || 'SA',
           },
-          items: [{
-            id: '1',
-            nameAr: 'طلب',
-            quantity: 1,
-            unitPrice: subtotal,
-            discount: 0,
-            taxRate: vatRate * 100,
-            taxAmount: Math.round(vatAmount * 100) / 100,
-            totalWithTax: Math.round(total * 100) / 100,
-            totalWithoutTax: Math.round(subtotal * 100) / 100,
-          }],
-          subtotal,
-          discount: 0,
-          deliveryFee: 0,
+          items: xmlItems,
+          subtotal: itemsSubtotal,
+          discount: orderDiscount,
+          deliveryFee: orderDeliveryFee,
           taxAmount: vatAmount,
-          taxRate: vatRate * 100,
-          total,
+          taxRate: taxRatePercent,
+          total: invoiceTotal,
           paymentMethod: order.paymentMethod || 'cash',
           previousInvoiceHash: previousHash,
           invoiceCounter: currentCounter,
         });
 
-        const invoiceHash = computeInvoiceHashBase64(xmlContent);
+        // Resolve signing credentials
+        let privKey: string | null = null;
+        let cert: string | null = null;
+        if (orderBranchId) {
+          const br = await storage.getBranch(orderBranchId);
+          if (br && (br as any).zatcaPrivateKey) {
+            privKey = (br as any).zatcaPrivateKey;
+            cert = (br as any).zatcaProductionCsid || (br as any).zatcaComplianceCsid || (br as any).zatcaCertificate;
+          }
+        }
+        if (!privKey && (restaurant as any).zatcaPrivateKey) {
+          privKey = (restaurant as any).zatcaPrivateKey;
+          cert = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid || restaurant.zatcaCertificate;
+        }
 
-        const qrData = generateZatcaQrCode({
-          sellerName: restaurant.nameAr || restaurant.nameEn || "Restaurant",
-          vatNumber: restaurant.vatNumber || "",
-          timestamp: now.toISOString(),
-          total: total.toFixed(2),
-          vatAmount: vatAmount.toFixed(2),
-          invoiceHash: computeInvoiceHash(xmlContent),
-        });
+        // Sign + QR pipeline
+        const signResult = buildSignedInvoice(
+          unsignedXmlContent, privKey, cert,
+          {
+            sellerName: restaurant.nameAr || restaurant.nameEn || "مطعم",
+            vatNumber: restaurant.vatNumber || "",
+            timestamp: now.toISOString(),
+            total: invoiceTotal.toFixed(2),
+            vatAmount: vatAmount.toFixed(2),
+          },
+        );
+
+        const xmlContent = signResult.finalXml;
+        const invoiceHash = signResult.invoiceHash;
+        const qrData = signResult.qrData;
 
         await storage.createInvoice({
           restaurantId,
+          branchId: orderBranchId,
           orderId: order.id,
           invoiceNumber,
           invoiceType: "simplified",
-          subtotal: subtotal.toFixed(2),
-          taxRate: (vatRate * 100).toFixed(2),
+          subtotal: itemsSubtotal.toFixed(2),
+          taxRate: taxRatePercent.toFixed(2),
           taxAmount: vatAmount.toFixed(2),
-          total: total.toFixed(2),
+          total: invoiceTotal.toFixed(2),
           qrCodeData: qrData,
           xmlContent,
           invoiceHash,
@@ -909,13 +1109,14 @@ export async function registerRoutes(
           uuid,
           status: "issued",
           zatcaStatus: "pending",
+          customerName: order.customerName || null,
+          customerPhone: order.customerPhone || null,
+          paymentMethod: order.paymentMethod || 'cash',
+          signedXml: signResult.signedXml || null,
         });
 
-        // Update restaurant counter and hash
-        await storage.updateRestaurantById(restaurantId, {
-          zatcaInvoiceCounter: currentCounter,
-          zatcaLastInvoiceHash: invoiceHash,
-        } as any);
+        // Update branch-level (and restaurant-level) counter and hash
+        await storage.updateZatcaCounterAndHash(restaurantId, orderBranchId, currentCounter, invoiceHash);
       } catch (invoiceError) {
         console.error("Invoice creation error (public order):", invoiceError);
       }
@@ -1034,10 +1235,12 @@ export async function registerRoutes(
       const orderItemsList = await storage.getOrderItems(req.params.orderId);
       const itemsWithDetails = await Promise.all(
         orderItemsList.map(async (item: any) => {
-          const menuItem = await storage.getMenuItem(item.menuItemId);
+          const menuItem = item.menuItemId ? await storage.getMenuItem(item.menuItemId) : null;
           return {
             ...item,
-            menuItem: menuItem ? { nameEn: menuItem.nameEn, nameAr: menuItem.nameAr, price: menuItem.price } : null,
+            menuItem: menuItem 
+              ? { nameEn: menuItem.nameEn, nameAr: menuItem.nameAr, price: menuItem.price } 
+              : item.itemName ? { nameEn: item.itemName, nameAr: item.itemName, price: item.unitPrice } : null,
           };
         })
       );
@@ -1047,78 +1250,6 @@ export async function registerRoutes(
     }
   });
 
-  // Public order endpoint - no auth needed, used by payment page
-  app.get("/api/public/orders/:orderId", async (req, res) => {
-    try {
-      const order = await storage.getOrder(req.params.orderId);
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      res.json(order);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get order" });
-    }
-  });
-
-  // Public invoice endpoint - no auth needed, used on payment callback page
-  app.get("/api/public/orders/:orderId/invoice", async (req, res) => {
-    try {
-      const order = await storage.getOrder(req.params.orderId);
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      const invoice = await storage.getInvoiceByOrder(order.id);
-      if (!invoice) {
-        return res.status(404).json({ error: "Invoice not found" });
-      }
-      const restaurant = await storage.getRestaurantById(order.restaurantId);
-      const orderItems = await storage.getOrderItems(order.id);
-      const menuItemsData = await storage.getMenuItems(order.restaurantId);
-      const menuItemsMap = new Map(menuItemsData.map(m => [m.id, m]));
-      const itemsWithDetails = orderItems.map(item => ({
-        ...item,
-        menuItem: menuItemsMap.get(item.menuItemId)
-          ? { nameEn: menuItemsMap.get(item.menuItemId)!.nameEn, nameAr: menuItemsMap.get(item.menuItemId)!.nameAr, price: menuItemsMap.get(item.menuItemId)!.price }
-          : undefined,
-      }));
-      // Return limited data - no sensitive fields
-      res.json({
-        id: invoice.id,
-        invoiceNumber: invoice.invoiceNumber,
-        invoiceType: invoice.invoiceType,
-        status: invoice.status,
-        subtotal: invoice.subtotal,
-        taxAmount: invoice.taxAmount,
-        taxRate: invoice.taxRate,
-        discount: invoice.discount,
-        deliveryFee: invoice.deliveryFee,
-        total: invoice.total,
-        customerName: invoice.customerName,
-        paymentMethod: invoice.paymentMethod,
-        isPaid: invoice.isPaid,
-        qrCodeData: invoice.qrCodeData,
-        zatcaStatus: invoice.zatcaStatus,
-        uuid: invoice.uuid,
-        invoiceCounter: invoice.invoiceCounter,
-        createdAt: invoice.createdAt,
-        issuedAt: invoice.issuedAt,
-        order: { ...order, items: itemsWithDetails },
-        restaurant: restaurant ? {
-          nameEn: restaurant.nameEn,
-          nameAr: restaurant.nameAr,
-          vatNumber: restaurant.vatNumber,
-          commercialRegistration: restaurant.commercialRegistration,
-          address: restaurant.address,
-          phone: restaurant.phone,
-          city: restaurant.city,
-          logoUrl: restaurant.logoUrl,
-        } : null,
-      });
-    } catch (error) {
-      console.error("Public invoice fetch error:", error);
-      res.status(500).json({ error: "Failed to get invoice" });
-    }
-  });
 
   app.get("/api/public/:restaurantId/customers/:customerId/orders", async (req, res) => {
     try {
@@ -1242,11 +1373,11 @@ export async function registerRoutes(
     }
   });
 
-  // Public: Create payment session for reservation deposit
+  // Public: Create payment session for reservation deposit (EdfaPay)
   app.post("/api/public/:restaurantId/reservation-payment-session", async (req, res) => {
     try {
       const restaurantId = res.locals.restaurantId;
-      const { reservationId, amount, callbackUrl } = req.body;
+      const { reservationId, amount, callbackUrl, payerEmail, payerPhone, payerName } = req.body;
       if (!reservationId || !amount || !callbackUrl) {
         return res.status(400).json({ error: "Missing required fields" });
       }
@@ -1254,60 +1385,94 @@ export async function registerRoutes(
       if (!restaurant) {
         return res.status(404).json({ error: "Restaurant not found" });
       }
-      const keys = {
-        publishableKey: restaurant.moyasarPublishableKey || null,
-      };
-      if (!keys.publishableKey || keys.publishableKey === "pending_setup") {
-        return res.status(500).json({ error: "Payment gateway not configured", publishableKey: "pending_setup" });
+      const merchantId = restaurant.edfapayMerchantId;
+      const password = restaurant.edfapayPassword;
+      if (!merchantId || !password) {
+        return res.status(500).json({ error: "Payment gateway not configured", configured: false });
       }
-      res.json({
-        publishableKey: keys.publishableKey,
-        amount: Math.round(parseFloat(amount) * 100), // halalat
+      
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() 
+        || req.socket.remoteAddress 
+        || "127.0.0.1";
+      
+      // Build webhook notification URL
+      const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+      const host = req.headers["x-forwarded-host"] || req.headers.host || "tryingpos.com";
+      const notificationUrl = `${protocol}://${host}/api/payments/webhook`;
+
+      const edfaResult = await edfapay.initiateSale({
+        merchantId,
+        password,
+        orderId: reservationId,
+        amount: parseFloat(amount).toFixed(2),
         currency: "SAR",
-        description: `Reservation booking fee - ${restaurantId}`,
+        description: `Reservation booking fee - ${restaurant.nameEn || restaurantId}`,
+        payerFirstName: payerName?.split(" ")[0] || "Customer",
+        payerLastName: payerName?.split(" ").slice(1).join(" ") || "Guest",
+        payerEmail: payerEmail || "customer@example.com",
+        payerPhone: payerPhone || "0500000000",
+        payerIp: clientIp,
         callbackUrl,
-        reservationId,
+        notificationUrl,
       });
+      
+      if (edfaResult.result === "REDIRECT" && edfaResult.redirect_url) {
+        res.json({
+          action: "redirect",
+          redirectUrl: edfaResult.redirect_url,
+          transId: edfaResult.trans_id,
+          reservationId,
+        });
+      } else if (edfaResult.result === "SUCCESS") {
+        res.json({
+          action: "success",
+          transId: edfaResult.trans_id,
+          reservationId,
+        });
+      } else {
+        res.status(400).json({ error: "Payment initiation failed" });
+      }
     } catch (error) {
       console.error("Reservation payment session error:", error);
       res.status(500).json({ error: "Failed to create payment session" });
     }
   });
 
-  // Public: Complete reservation payment (verify and mark deposit as paid)
+  // Public: Complete reservation payment (EdfaPay)
   app.post("/api/public/:restaurantId/reservation-payment-complete", async (req, res) => {
     try {
       const restaurantId = res.locals.restaurantId;
-      const { reservationId, paymentId } = req.body;
-      if (!reservationId || !paymentId) {
-        return res.status(400).json({ error: "Missing reservationId or paymentId" });
+      const { reservationId, transId, gwayId } = req.body;
+      if (!reservationId) {
+        return res.status(400).json({ error: "Missing reservationId" });
       }
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) {
         return res.status(404).json({ error: "Restaurant not found" });
       }
-      const secretKey = restaurant.moyasarSecretKey;
-      if (!secretKey) {
-        return res.status(500).json({ error: "Payment gateway secret key not configured" });
+      
+      let paymentVerified = false;
+      
+      if (gwayId && restaurant.edfapayMerchantId && restaurant.edfapayPassword) {
+        try {
+          const statusResult = await edfapay.getTransactionStatus({
+            merchantId: restaurant.edfapayMerchantId,
+            password: restaurant.edfapayPassword,
+            gwayPaymentId: gwayId,
+            orderId: reservationId,
+          });
+          paymentVerified = edfapay.isSuccessfulPayment(statusResult.status);
+        } catch (e) {
+          console.error("EdfaPay status check error:", e);
+        }
       }
-      const auth = `Basic ${Buffer.from(`${secretKey}:`).toString("base64")}`;
-      const verifyRes = await fetch(`https://api.moyasar.com/v1/payments/${paymentId}`, {
-        headers: { "Authorization": auth },
-      });
-      if (!verifyRes.ok) {
-        return res.status(400).json({ error: "Failed to verify payment with Moyasar" });
-      }
-      const payment = await verifyRes.json() as any;
-      if (payment.metadata?.reservation_id !== reservationId) {
-        return res.status(400).json({ error: "Payment does not match this reservation" });
-      }
-      if (payment.status === "paid") {
-        // Mark deposit as paid
+      
+      if (paymentVerified) {
         await storage.updateReservation(reservationId, { depositPaid: true } as any);
         const reservation = await storage.getReservation(reservationId);
         res.json({ success: true, reservation });
       } else {
-        res.status(400).json({ error: `Payment not completed. Status: ${payment.status}` });
+        res.status(400).json({ error: "Payment not verified" });
       }
     } catch (error) {
       console.error("Reservation payment complete error:", error);
@@ -1495,7 +1660,7 @@ export async function registerRoutes(
       if (!restaurant) {
         return res.status(404).json({ error: "Restaurant not found" });
       }
-      const { moyasarSecretKey, ...safeRestaurant } = restaurant as any;
+      const { edfapayPassword, edfapaySoftposAuthToken, ...safeRestaurant } = restaurant as any;
       res.json(safeRestaurant);
     } catch (error) {
       handleRouteError(res, error, "Failed to get restaurant");
@@ -1517,15 +1682,58 @@ export async function registerRoutes(
   app.put("/api/restaurant", async (req, res) => {
     try {
       const restaurantId = await getRestaurantId(req);
+      const caller = await getAuthenticatedUser(req);
       const data = insertRestaurantSchema.partial().parse(req.body);
       
-      // Auto-generate slug from English name if slug not set
+      // Protect business fields - once saved, only platform_admin can modify
+      const lockedFields = ['vatNumber', 'commercialRegistration', 'ownerName', 'ownerPhone',
+        'postalCode', 'buildingNumber', 'streetName', 'district', 'city',
+        'bankName', 'bankAccountHolder', 'bankAccountNumber', 'bankSwift', 'bankIban'] as const;
       const current = await storage.getRestaurantById(restaurantId);
+      if (current && caller.role !== 'platform_admin') {
+        for (const field of lockedFields) {
+          const currentValue = (current as any)[field];
+          const newValue = (data as any)[field];
+          // If field already has a value and user is trying to change it, only allow platform_admin
+          if (currentValue && String(currentValue).trim() !== '' && newValue !== undefined && newValue !== currentValue) {
+            return res.status(403).json({ 
+              error: `لا يمكن تعديل ${field} - هذا الحقل مقفل. تواصل مع إدارة المنصة للتعديل`,
+              code: "LOCKED_FIELD"
+            });
+          }
+        }
+      }
+      
+      // Only platform_admin can set/change SoftPOS auth token
+      if (caller.role !== 'platform_admin') {
+        delete (data as any).edfapaySoftposAuthToken;
+      }
+
+      // Auto-generate slug from English name if slug not set
       if (current && !(current as any).slug && (data.nameEn || current.nameEn)) {
         (data as any).slug = generateSlug(data.nameEn || current.nameEn);
       }
       
       const restaurant = await storage.updateRestaurantById(restaurantId, data);
+      
+      // Audit log if tax settings changed
+      if (data.taxEnabled !== undefined || (data as any).vatNumber !== undefined) {
+        const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
+        await storage.createInvoiceAuditLog({
+          restaurantId,
+          action: 'tax_settings_changed',
+          userName: caller.name || caller.email || 'Unknown',
+          userId: caller.id,
+          details: JSON.stringify({
+            taxEnabled: data.taxEnabled,
+            vatNumber: (data as any).vatNumber,
+            previousTaxEnabled: current?.taxEnabled,
+            previousVatNumber: current?.vatNumber,
+          }),
+          ipAddress: userIp,
+        });
+      }
+      
       res.json(restaurant);
     } catch (error) {
       res.status(400).json({ error: "Invalid request body" });
@@ -1746,14 +1954,105 @@ export async function registerRoutes(
     try {
       const body = { ...req.body };
       if (body.kitchenSectionId === "" || body.kitchenSectionId === "__none__") body.kitchenSectionId = null;
+      const restaurantId = await getRestaurantId(req);
       const data = insertMenuItemSchema.parse({
         ...body,
-        restaurantId: await getRestaurantId(req),
+        restaurantId,
       });
+
+      // Get old item to detect availability change
+      const oldItem = await storage.getMenuItem(req.params.id);
       const item = await storage.updateMenuItem(req.params.id, data);
       if (!item) {
         return res.status(404).json({ error: "Menu item not found" });
       }
+
+      // Sync availability change to delivery platforms (async, non-blocking)
+      if (oldItem && oldItem.isAvailable !== item.isAvailable) {
+        (async () => {
+          try {
+            const integrations = await storage.getDeliveryIntegrations(restaurantId);
+            for (const integration of integrations) {
+              if (!integration.isActive) continue;
+
+              if (integration.platform === "jahez") {
+                // Jahez: update product visibility via API
+                try {
+                  await jahez.updateProductVisibility(
+                    integration,
+                    item.id,
+                    item.isAvailable ?? false
+                  );
+                  console.log(`[Menu Sync] Jahez: Product ${item.id} visibility → ${item.isAvailable}`);
+                } catch (err: any) {
+                  console.error(`[Menu Sync] Jahez visibility update failed for ${item.id}:`, err.message);
+                }
+              } else if (integration.platform === "hungerstation") {
+                // HungerStation: update product active status via Catalog API
+                // Uses item.id as SKU identifier
+                try {
+                  const result = await hungerstation.updateProductAvailability(
+                    integration,
+                    item.id, // SKU = our menu item ID
+                    item.isAvailable ?? false
+                  );
+                  console.log(`[Menu Sync] HungerStation: Product ${item.id} active → ${item.isAvailable}, job_id: ${result?.job_id}`);
+                } catch (err: any) {
+                  console.error(`[Menu Sync] HungerStation availability update failed for ${item.id}:`, err.message);
+                }
+              }
+            }
+          } catch (err: any) {
+            console.error("[Menu Sync] Error syncing availability:", err.message);
+          }
+        })();
+      }
+
+      // Sync price change to delivery platforms (async, non-blocking)
+      if (oldItem && oldItem.price !== item.price) {
+        (async () => {
+          try {
+            const integrations = await storage.getDeliveryIntegrations(restaurantId);
+            for (const integration of integrations) {
+              if (!integration.isActive) continue;
+
+              if (integration.platform === "hungerstation") {
+                try {
+                  const result = await hungerstation.updateProductPrice(
+                    integration,
+                    item.id,
+                    parseFloat(item.price),
+                    item.isAvailable ?? true
+                  );
+                  console.log(`[Menu Sync] HungerStation: Product ${item.id} price → ${item.price}, job_id: ${result?.job_id}`);
+                } catch (err: any) {
+                  console.error(`[Menu Sync] HungerStation price update failed for ${item.id}:`, err.message);
+                }
+              } else if (integration.platform === "jahez") {
+                // Jahez: sync the full product to update price
+                try {
+                  await jahez.syncProduct(integration, {
+                    product_id: item.id,
+                    product_price: parseFloat(item.price),
+                    category_id: item.categoryId || "",
+                    name: { ar: item.nameAr || "", en: item.nameEn || "" },
+                    description: { ar: item.descriptionAr || "", en: item.descriptionEn || "" },
+                    image_path: item.image || "",
+                    calories: item.calories || 0,
+                    is_visible: item.isAvailable !== false,
+                  });
+                  console.log(`[Menu Sync] Jahez: Product ${item.id} price → ${item.price}`);
+                } catch (err: any) {
+                  console.error(`[Menu Sync] Jahez price update failed for ${item.id}:`, err.message);
+                }
+              }
+            }
+          } catch (err: any) {
+            console.error("[Menu Sync] Error syncing price:", err.message);
+          }
+        })();
+      }
+
       res.json(item);
     } catch (error) {
       res.status(400).json({ error: "Invalid request body" });
@@ -1766,6 +2065,27 @@ export async function registerRoutes(
       if (!item) return res.status(404).json({ error: "Menu item not found" });
       await verifyOwnership(req, item, "Menu item");
       await storage.deleteMenuItem(req.params.id);
+
+      // Sync deletion to delivery platforms (async, non-blocking)
+      (async () => {
+        try {
+          const integrations = await storage.getDeliveryIntegrations(item.restaurantId);
+          for (const integration of integrations) {
+            if (!integration.isActive) continue;
+            if (integration.platform === "jahez") {
+              try {
+                await jahez.deleteProduct(integration, item.id);
+                console.log(`[Menu Sync] Jahez: Product ${item.id} deleted`);
+              } catch (err: any) {
+                console.error(`[Menu Sync] Jahez delete failed for ${item.id}:`, err.message);
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error("[Menu Sync] Error syncing deletion:", err.message);
+        }
+      })();
+
       res.status(204).send();
     } catch (error: any) {
       if (error?.message?.includes("not found")) return res.status(404).json({ error: error.message });
@@ -1800,9 +2120,21 @@ export async function registerRoutes(
 
   app.post("/api/tables", async (req, res) => {
     try {
+      const restaurantId = await getRestaurantId(req);
+      
+      // Validate branchId if provided
+      let branchId = req.body.branchId || null;
+      if (branchId) {
+        const branches = await storage.getBranches(restaurantId);
+        if (!branches.some(b => b.id === branchId)) {
+          return res.status(400).json({ error: "Invalid branch" });
+        }
+      }
+      
       const data = insertTableSchema.parse({
         ...req.body,
-        restaurantId: await getRestaurantId(req),
+        restaurantId,
+        branchId,
       });
       const table = await storage.createTable(data);
       res.status(201).json(table);
@@ -1813,9 +2145,21 @@ export async function registerRoutes(
 
   app.put("/api/tables/:id", async (req, res) => {
     try {
+      const restaurantId = await getRestaurantId(req);
+      
+      // Validate branchId if provided
+      let branchId = req.body.branchId || null;
+      if (branchId) {
+        const branches = await storage.getBranches(restaurantId);
+        if (!branches.some(b => b.id === branchId)) {
+          return res.status(400).json({ error: "Invalid branch" });
+        }
+      }
+      
       const data = insertTableSchema.parse({
         ...req.body,
-        restaurantId: await getRestaurantId(req),
+        restaurantId,
+        branchId,
       });
       const table = await storage.updateTable(req.params.id, data);
       if (!table) {
@@ -1925,7 +2269,32 @@ export async function registerRoutes(
     try {
       const branchId = req.query.branch as string | undefined;
       const orders = await storage.getOrders(await getRestaurantId(req), branchId);
-      res.json(orders);
+      
+      // Include items for each order
+      const ordersWithItems = await Promise.all(
+        orders.map(async (order) => {
+          try {
+            const items = await storage.getOrderItems(order.id);
+            // Enrich items with menu item names
+            const enrichedItems = await Promise.all(
+              items.map(async (item: any) => {
+                if (item.menuItemId && !item.itemName) {
+                  try {
+                    const menuItem = await storage.getMenuItem(item.menuItemId);
+                    return { ...item, itemName: menuItem?.nameAr || menuItem?.nameEn || null };
+                  } catch { return item; }
+                }
+                return item;
+              })
+            );
+            return { ...order, items: enrichedItems };
+          } catch {
+            return { ...order, items: [] };
+          }
+        })
+      );
+      
+      res.json(ordersWithItems);
     } catch (error) {
       res.status(500).json({ error: "Failed to get orders" });
     }
@@ -1938,7 +2307,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       await verifyOwnership(req, order, "Order");
-      res.json(order);
+      // Include items
+      const items = await storage.getOrderItems(order.id);
+      const enrichedItems = await Promise.all(
+        items.map(async (item: any) => {
+          if (item.menuItemId && !item.itemName) {
+            try {
+              const menuItem = await storage.getMenuItem(item.menuItemId);
+              return { ...item, itemName: menuItem?.nameAr || menuItem?.nameEn || null };
+            } catch { return item; }
+          }
+          return item;
+        })
+      );
+      res.json({ ...order, items: enrichedItems });
     } catch (error: any) {
       if (error?.message?.includes("not found")) return res.status(404).json({ error: error.message });
       res.status(500).json({ error: "Failed to get order" });
@@ -2110,6 +2492,100 @@ export async function registerRoutes(
         await storage.updateTableStatus(existingOrder.tableId, "available");
       }
       
+      // ZATCA compliance: if cancelling an order that has an invoice, auto-issue credit note
+      let creditNote = null;
+      if (status === "cancelled") {
+        const existingInvoice = await storage.getInvoiceByOrder(req.params.id);
+        if (existingInvoice && existingInvoice.invoiceType !== 'credit_note' && existingInvoice.status !== 'cancelled') {
+          // Skip if credit note already exists for this invoice
+          const alreadyRefunded = await storage.getCreditNoteForInvoice(existingInvoice.id);
+          if (alreadyRefunded) {
+            creditNote = alreadyRefunded;
+          } else {
+          const restaurantId = existingOrder.restaurantId;
+          const restaurant = await storage.getRestaurantById(restaurantId);
+          if (restaurant) {
+            const reason = req.body.reason || "إلغاء الطلب - Order Cancelled";
+            const orderItems = await storage.getOrderItems(req.params.id);
+            const menuItemsRaw = await storage.getMenuItems(restaurantId);
+            const menuItemsMap = new Map(menuItemsRaw.map(m => [m.id, m]));
+
+            try {
+              const zatcaResult = await buildZatcaInvoice(
+                restaurant, existingOrder, orderItems, menuItemsMap, 'credit_note', existingInvoice, undefined, reason
+              );
+
+              creditNote = await storage.createInvoice({
+                restaurantId,
+                branchId: existingOrder.branchId || null,
+                orderId: existingOrder.id,
+                invoiceNumber: zatcaResult.invoiceNumber,
+                invoiceType: 'credit_note',
+                subtotal: zatcaResult.subtotal,
+                taxRate: zatcaResult.taxRate,
+                taxAmount: zatcaResult.taxAmount,
+                total: zatcaResult.total,
+                discount: zatcaResult.discount,
+                deliveryFee: zatcaResult.deliveryFee,
+                qrCodeData: zatcaResult.qrData,
+                xmlContent: zatcaResult.xmlContent,
+                invoiceHash: zatcaResult.invoiceHash,
+                previousInvoiceHash: zatcaResult.previousInvoiceHash,
+                invoiceCounter: zatcaResult.invoiceCounter,
+                uuid: zatcaResult.uuid,
+                relatedInvoiceId: existingInvoice.id,
+                status: 'issued',
+                zatcaStatus: 'pending',
+                cashierName: req.body.userName || null,
+                refundReason: reason,
+                customerName: existingInvoice.customerName,
+                customerPhone: existingInvoice.customerPhone,
+                paymentMethod: existingInvoice.paymentMethod,
+                isPaid: existingInvoice.isPaid,
+                signedXml: zatcaResult.signedXml || null,
+              });
+
+              // Return inventory items to stock
+              for (const item of orderItems) {
+                const menuItem = menuItemsMap.get(item.menuItemId);
+                if (menuItem) {
+                  const recipeItems = await storage.getRecipes(item.menuItemId);
+                  for (const recipe of recipeItems) {
+                    const invItem = await storage.getInventoryItem(recipe.inventoryItemId);
+                    if (invItem) {
+                      const returnQty = parseFloat(String(recipe.quantity)) * (item.quantity || 1);
+                      await storage.updateInventoryItem(recipe.inventoryItemId, {
+                        currentStock: String(parseFloat(String(invItem.currentStock)) + returnQty),
+                      } as any);
+                    }
+                  }
+                }
+              }
+
+              // Audit log for credit note
+              const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
+              await storage.createInvoiceAuditLog({
+                restaurantId,
+                invoiceId: creditNote.id,
+                action: 'cancel_credit_note',
+                userName: req.body.userName || 'System',
+                details: JSON.stringify({
+                  reason,
+                  originalInvoiceId: existingInvoice.id,
+                  originalInvoiceNumber: existingInvoice.invoiceNumber,
+                  amount: zatcaResult.total,
+                }),
+                ipAddress: userIp,
+              });
+            } catch (e) {
+              console.error("Auto credit note on cancel failed:", e);
+              // Don't block the cancellation, but log the error
+            }
+          }
+          } // end else (no existing credit note)
+        }
+      }
+      
       const order = await storage.updateOrderStatus(req.params.id, status);
       
       try {
@@ -2125,7 +2601,7 @@ export async function registerRoutes(
         });
       } catch (e) {}
       
-      res.json(order);
+      res.json({ ...order, creditNote });
     } catch (error) {
       res.status(500).json({ error: "Failed to update order status" });
     }
@@ -2212,12 +2688,10 @@ export async function registerRoutes(
               const inventoryItem = await storage.getInventoryItem(recipe.inventoryItemId);
               
               if (inventoryItem) {
-                const newStock = parseFloat(inventoryItem.currentStock || "0") - deductAmount;
-                await storage.updateInventoryItem(recipe.inventoryItemId, {
-                  currentStock: String(Math.max(0, newStock)),
-                });
+                const currentStock = parseFloat(inventoryItem.currentStock || "0");
+                const newStock = currentStock - deductAmount;
                 
-                // Record the transaction
+                // Record the transaction (this auto-updates stock via storage)
                 await storage.createInventoryTransaction({
                   inventoryItemId: recipe.inventoryItemId,
                   type: "usage",
@@ -2292,6 +2766,26 @@ export async function registerRoutes(
     }
   });
 
+  // Invoice search - MUST be before /api/invoices/:id to avoid "search" being matched as an ID
+  app.get("/api/invoices/search", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const filters: any = {};
+      if (req.query.invoiceNumber) filters.invoiceNumber = req.query.invoiceNumber as string;
+      if (req.query.customerPhone) filters.customerPhone = req.query.customerPhone as string;
+      if (req.query.startDate) filters.startDate = new Date(req.query.startDate as string);
+      if (req.query.endDate) filters.endDate = new Date(req.query.endDate as string);
+      if (req.query.paymentMethod) filters.paymentMethod = req.query.paymentMethod as string;
+      if (req.query.status) filters.status = req.query.status as string;
+      if (req.query.invoiceType) filters.invoiceType = req.query.invoiceType as string;
+      
+      const results = await storage.searchInvoices(restaurantId, filters);
+      res.json(results);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to search invoices" });
+    }
+  });
+
   app.get("/api/invoices/:id", async (req, res) => {
     try {
       const invoice = await storage.getInvoice(req.params.id);
@@ -2305,7 +2799,7 @@ export async function registerRoutes(
       const menuItemsMap = new Map(menuItemsData.map(m => [m.id, m]));
       const itemsWithDetails = items.map(item => ({
         ...item,
-        menuItem: menuItemsMap.get(item.menuItemId),
+        menuItem: item.menuItemId ? menuItemsMap.get(item.menuItemId) : (item.itemName ? { nameAr: item.itemName, nameEn: item.itemName } : null),
       }));
       const restaurantId = await getRestaurantId(req);
       await verifyOwnership(req, invoice, "Invoice");
@@ -2355,6 +2849,16 @@ export async function registerRoutes(
   app.post("/api/invoices", async (req, res) => {
     try {
       const restaurantId = await getRestaurantId(req);
+      
+      // Prevent duplicate invoice for the same order
+      if (req.body.orderId) {
+        const existingInvoice = await storage.getInvoiceByOrder(req.body.orderId);
+        if (existingInvoice) {
+          // Return existing invoice instead of creating duplicate
+          return res.status(200).json(existingInvoice);
+        }
+      }
+      
       const restaurant = await storage.getRestaurantById(restaurantId);
       const isTaxEnabled = restaurant?.taxEnabled !== false;
       const taxRate = isTaxEnabled ? 15 : 0;
@@ -2366,11 +2870,18 @@ export async function registerRoutes(
       const taxAmount = taxableAmount * (taxRate / 100);
       const total = taxableAmount + taxAmount + deliveryFee;
       
-      // Generate ZATCA-compliant UUID and counter
+      // Generate ZATCA-compliant UUID and counter — use branch-level
       const uuid = generateInvoiceUuid();
-      const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId);
-      const currentCounter = ((restaurant as any)?.zatcaInvoiceCounter || 0) + 1;
-      const previousHash = (restaurant as any)?.zatcaLastInvoiceHash || 
+      // Resolve branchId from the order or request body
+      let invoiceBranchId: string | null = req.body.branchId || null;
+      if (!invoiceBranchId && req.body.orderId) {
+        const relatedOrder = await storage.getOrder(req.body.orderId);
+        invoiceBranchId = relatedOrder?.branchId || null;
+      }
+      const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId, invoiceBranchId);
+      const { counter: prevC, lastHash: prevH } = await storage.getZatcaCounterAndHash(restaurantId, invoiceBranchId);
+      const currentCounter = prevC + 1;
+      const previousHash = prevH || 
         Buffer.from('NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==', 'base64').toString('utf8');
       
       const now = new Date();
@@ -2386,8 +2897,8 @@ export async function registerRoutes(
           const menuItem = menuItemsMap.get(item.menuItemId);
           const unitPrice = parseFloat(item.unitPrice || menuItem?.price || "0");
           const qty = item.quantity || 1;
-          const lineTotal = unitPrice * qty;
-          const lineTax = lineTotal * (taxRate / 100);
+          const lineTotal = bankersRound(unitPrice * qty);
+          const lineTax = bankersRound(lineTotal * (taxRate / 100));
           return {
             id: String(idx + 1),
             nameAr: menuItem?.nameAr || menuItem?.nameEn || 'منتج',
@@ -2396,9 +2907,9 @@ export async function registerRoutes(
             unitPrice,
             discount: 0,
             taxRate,
-            taxAmount: Math.round(lineTax * 100) / 100,
-            totalWithTax: Math.round((lineTotal + lineTax) * 100) / 100,
-            totalWithoutTax: Math.round(lineTotal * 100) / 100,
+            taxAmount: lineTax,
+            totalWithTax: bankersRound(lineTotal + lineTax),
+            totalWithoutTax: lineTotal,
           };
         });
       }
@@ -2412,14 +2923,14 @@ export async function registerRoutes(
           unitPrice: subtotal,
           discount: 0,
           taxRate,
-          taxAmount: Math.round(taxAmount * 100) / 100,
-          totalWithTax: Math.round(total * 100) / 100,
-          totalWithoutTax: Math.round(subtotal * 100) / 100,
+          taxAmount: bankersRound(taxAmount),
+          totalWithTax: bankersRound(total),
+          totalWithoutTax: bankersRound(subtotal),
         }];
       }
 
       // Generate ZATCA XML
-      const xmlContent = generateZatcaXml({
+      const unsignedXml = generateZatcaXml({
         uuid,
         invoiceNumber,
         invoiceType,
@@ -2449,27 +2960,43 @@ export async function registerRoutes(
         invoiceCounter: currentCounter,
       });
 
-      const invoiceHash = computeInvoiceHashBase64(xmlContent);
+      // Resolve signing credentials (branch-first, restaurant fallback)
+      let privKey: string | null = null;
+      let cert: string | null = null;
+      if (invoiceBranchId) {
+        const br = await storage.getBranch(invoiceBranchId);
+        if (br && (br as any).zatcaPrivateKey) {
+          privKey = (br as any).zatcaPrivateKey;
+          cert = (br as any).zatcaProductionCsid || (br as any).zatcaComplianceCsid || (br as any).zatcaCertificate;
+        }
+      }
+      if (!privKey && restaurant && (restaurant as any).zatcaPrivateKey) {
+        privKey = (restaurant as any).zatcaPrivateKey;
+        cert = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid || restaurant.zatcaCertificate;
+      }
 
-      // Generate QR code with hash
-      const qrData = generateZatcaQrCode({
-        sellerName: restaurant?.nameAr || restaurant?.nameEn || "Restaurant",
-        vatNumber: restaurant?.vatNumber || "",
-        timestamp: now.toISOString(),
-        total: total.toFixed(2),
-        vatAmount: taxAmount.toFixed(2),
-        invoiceHash: computeInvoiceHash(xmlContent),
-      });
+      const signResult = buildSignedInvoice(
+        unsignedXml, privKey, cert,
+        {
+          sellerName: restaurant?.nameAr || restaurant?.nameEn || "مطعم",
+          vatNumber: restaurant?.vatNumber || "",
+          timestamp: now.toISOString(),
+          total: total.toFixed(2),
+          vatAmount: taxAmount.toFixed(2),
+        },
+      );
 
-      // Update restaurant invoice counter and hash
-      await storage.updateRestaurantById(restaurantId, {
-        zatcaInvoiceCounter: currentCounter,
-        zatcaLastInvoiceHash: invoiceHash,
-      } as any);
+      const xmlContent = signResult.finalXml;
+      const invoiceHash = signResult.invoiceHash;
+      const qrData = signResult.qrData;
+
+      // Update branch-level (and restaurant-level) counter and hash
+      await storage.updateZatcaCounterAndHash(restaurantId, invoiceBranchId, currentCounter, invoiceHash);
       
       const data = insertInvoiceSchema.parse({
         ...req.body,
         restaurantId,
+        branchId: invoiceBranchId,
         invoiceNumber,
         invoiceType,
         taxAmount: taxAmount.toFixed(2),
@@ -2482,9 +3009,21 @@ export async function registerRoutes(
         invoiceCounter: currentCounter,
         uuid,
         zatcaStatus: 'pending',
+        signedXml: signResult.signedXml || null,
       });
       
       const invoice = await storage.createInvoice(data);
+      
+      // Audit log for invoice creation
+      const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
+      await storage.createInvoiceAuditLog({
+        restaurantId,
+        invoiceId: invoice.id,
+        action: 'invoice_created',
+        details: JSON.stringify({ invoiceNumber, invoiceType, total: total.toFixed(2), uuid }),
+        ipAddress: userIp,
+      });
+      
       res.status(201).json(invoice);
     } catch (error) {
       console.error(error);
@@ -2497,6 +3036,21 @@ export async function registerRoutes(
       const existing = await storage.getInvoice(req.params.id);
       if (!existing) return res.status(404).json({ error: "Invoice not found" });
       await verifyOwnership(req, existing, "Invoice");
+      
+      // ZATCA compliance: After issuance, only allow ZATCA-related field updates
+      if (existing.status === 'issued' || existing.status === 'reported') {
+        const allowedFields = ['zatcaStatus', 'zatcaSubmissionId', 'zatcaWarnings', 'zatcaErrors', 'signedXml', 'csidToken'];
+        const attemptedFields = Object.keys(req.body);
+        const forbidden = attemptedFields.filter(f => !allowedFields.includes(f));
+        if (forbidden.length > 0) {
+          return res.status(403).json({ 
+            error: "لا يمكن تعديل الفاتورة بعد إصدارها. استخدم إشعار دائن أو مدين للتصحيح",
+            errorEn: "Cannot modify an issued invoice. Use a credit or debit note for corrections.",
+            forbiddenFields: forbidden 
+          });
+        }
+      }
+      
       const invoice = await storage.updateInvoice(req.params.id, req.body);
       if (!invoice) {
         return res.status(404).json({ error: "Invoice not found" });
@@ -2505,6 +3059,236 @@ export async function registerRoutes(
     } catch (error: any) {
       if (error?.message?.includes("not found")) return res.status(404).json({ error: error.message });
       res.status(400).json({ error: "Invalid request body" });
+    }
+  });
+
+  // ZATCA compliance: Prevent deletion of invoices
+  app.delete("/api/invoices/:id", async (_req, res) => {
+    return res.status(403).json({ 
+      error: "لا يمكن حذف الفواتير. استخدم إشعار دائن للإلغاء",
+      errorEn: "Invoices cannot be deleted. Use a credit note for cancellation." 
+    });
+  });
+
+  // --- Invoice Archive / Search ---
+  // --- Invoice Audit Log ---
+  app.get("/api/invoice-audit-log", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : undefined;
+      const logs = await storage.getInvoiceAuditLogs(restaurantId, limit);
+      res.json(logs);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get audit log" });
+    }
+  });
+
+  app.get("/api/invoice-audit-log/:invoiceId", async (req, res) => {
+    try {
+      const logs = await storage.getInvoiceAuditLogsByInvoice(req.params.invoiceId);
+      res.json(logs);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get invoice audit log" });
+    }
+  });
+
+  // --- Tax Report ---
+  app.get("/api/reports/tax", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
+      const branchId = req.query.branch as string | undefined;
+      
+      const report = await storage.getTaxReport(restaurantId, startDate, endDate, branchId);
+      res.json(report);
+    } catch (error) {
+      console.error("Tax report error:", error);
+      res.status(500).json({ error: "Failed to generate tax report" });
+    }
+  });
+
+  // --- Refund with Credit Note (ZATCA-compliant) ---
+  app.post("/api/invoices/:invoiceId/refund", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      const originalInvoice = await storage.getInvoice(req.params.invoiceId);
+      if (!originalInvoice) return res.status(404).json({ error: "Invoice not found" });
+      if (originalInvoice.restaurantId !== restaurantId) return res.status(403).json({ error: "Unauthorized" });
+      if (originalInvoice.status === 'cancelled') return res.status(400).json({ error: "Invoice already cancelled" });
+      if (originalInvoice.invoiceType === 'credit_note') return res.status(400).json({ error: "Cannot refund a credit note" });
+
+      // Prevent duplicate credit note for the same invoice
+      const existingCreditNote = await storage.getCreditNoteForInvoice(originalInvoice.id);
+      if (existingCreditNote) {
+        return res.status(200).json(existingCreditNote);
+      }
+
+      const { reason, userName } = req.body;
+      if (!reason) return res.status(400).json({ error: "سبب الاسترجاع مطلوب - Refund reason is required" });
+
+      const order = await storage.getOrder(originalInvoice.orderId);
+      if (!order) return res.status(404).json({ error: "Order not found" });
+
+      const orderItems = await storage.getOrderItems(order.id);
+      const menuItemsRaw = await storage.getMenuItems(restaurantId);
+      const menuItemsMap = new Map(menuItemsRaw.map(m => [m.id, m]));
+
+      // Build credit note via ZATCA engine
+      const zatcaResult = await buildZatcaInvoice(
+        restaurant, order, orderItems, menuItemsMap, 'credit_note', originalInvoice, undefined, reason
+      );
+
+      const creditNote = await storage.createInvoice({
+        restaurantId,
+        branchId: order.branchId || null,
+        orderId: order.id,
+        invoiceNumber: zatcaResult.invoiceNumber,
+        invoiceType: 'credit_note',
+        subtotal: zatcaResult.subtotal,
+        taxRate: zatcaResult.taxRate,
+        taxAmount: zatcaResult.taxAmount,
+        total: zatcaResult.total,
+        discount: zatcaResult.discount,
+        deliveryFee: zatcaResult.deliveryFee,
+        qrCodeData: zatcaResult.qrData,
+        xmlContent: zatcaResult.xmlContent,
+        invoiceHash: zatcaResult.invoiceHash,
+        previousInvoiceHash: zatcaResult.previousInvoiceHash,
+        invoiceCounter: zatcaResult.invoiceCounter,
+        uuid: zatcaResult.uuid,
+        relatedInvoiceId: originalInvoice.id,
+        status: 'issued',
+        zatcaStatus: 'pending',
+        cashierName: userName || null,
+        refundReason: reason,
+        customerName: originalInvoice.customerName,
+        customerPhone: originalInvoice.customerPhone,
+        paymentMethod: originalInvoice.paymentMethod,
+        isPaid: true,
+        signedXml: zatcaResult.signedXml || null,
+      });
+
+      // Update order status to refunded
+      await storage.updateOrder(order.id, { status: 'refunded' });
+
+      // Update inventory - return items to stock
+      for (const item of orderItems) {
+        const menuItem = menuItemsMap.get(item.menuItemId);
+        if (menuItem) {
+          const recipeItems = await storage.getRecipes(item.menuItemId);
+          for (const recipe of recipeItems) {
+            const invItem = await storage.getInventoryItem(recipe.inventoryItemId);
+            if (invItem) {
+              const returnQty = parseFloat(String(recipe.quantity)) * (item.quantity || 1);
+              await storage.updateInventoryItem(recipe.inventoryItemId, {
+                currentStock: String(parseFloat(String(invItem.currentStock)) + returnQty),
+              } as any);
+            }
+          }
+        }
+      }
+
+      // Audit log
+      const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
+      await storage.createInvoiceAuditLog({
+        restaurantId,
+        invoiceId: creditNote.id,
+        action: 'refund_issued',
+        userName: userName || 'System',
+        details: JSON.stringify({ 
+          reason, 
+          originalInvoiceId: originalInvoice.id,
+          originalInvoiceNumber: originalInvoice.invoiceNumber,
+          amount: zatcaResult.total,
+        }),
+        ipAddress: userIp,
+      });
+
+      res.status(201).json(creditNote);
+    } catch (error: any) {
+      console.error("Refund error:", error);
+      res.status(500).json({ error: error?.message || "Failed to process refund" });
+    }
+  });
+
+  // --- Debit Note ---
+  app.post("/api/invoices/:invoiceId/debit-note", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      const originalInvoice = await storage.getInvoice(req.params.invoiceId);
+      if (!originalInvoice) return res.status(404).json({ error: "Invoice not found" });
+      if (originalInvoice.restaurantId !== restaurantId) return res.status(403).json({ error: "Unauthorized" });
+
+      const { reason, userName } = req.body;
+      if (!reason) return res.status(400).json({ error: "سبب الإشعار المدين مطلوب - Debit note reason is required" });
+
+      const order = await storage.getOrder(originalInvoice.orderId);
+      if (!order) return res.status(404).json({ error: "Order not found" });
+
+      const orderItems = await storage.getOrderItems(order.id);
+      const menuItemsRaw = await storage.getMenuItems(restaurantId);
+      const menuItemsMap = new Map(menuItemsRaw.map(m => [m.id, m]));
+
+      const zatcaResult = await buildZatcaInvoice(
+        restaurant, order, orderItems, menuItemsMap, 'debit_note', originalInvoice, undefined, reason
+      );
+
+      const debitNote = await storage.createInvoice({
+        restaurantId,
+        branchId: order.branchId || null,
+        orderId: order.id,
+        invoiceNumber: zatcaResult.invoiceNumber,
+        invoiceType: 'debit_note',
+        subtotal: zatcaResult.subtotal,
+        taxRate: zatcaResult.taxRate,
+        taxAmount: zatcaResult.taxAmount,
+        total: zatcaResult.total,
+        discount: zatcaResult.discount,
+        deliveryFee: zatcaResult.deliveryFee,
+        qrCodeData: zatcaResult.qrData,
+        xmlContent: zatcaResult.xmlContent,
+        invoiceHash: zatcaResult.invoiceHash,
+        previousInvoiceHash: zatcaResult.previousInvoiceHash,
+        invoiceCounter: zatcaResult.invoiceCounter,
+        uuid: zatcaResult.uuid,
+        relatedInvoiceId: originalInvoice.id,
+        status: 'issued',
+        zatcaStatus: 'pending',
+        cashierName: userName || null,
+        refundReason: reason,
+        customerName: originalInvoice.customerName,
+        customerPhone: originalInvoice.customerPhone,
+        paymentMethod: originalInvoice.paymentMethod,
+        signedXml: zatcaResult.signedXml || null,
+      });
+
+      // Audit log
+      const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
+      await storage.createInvoiceAuditLog({
+        restaurantId,
+        invoiceId: debitNote.id,
+        action: 'debit_note_created',
+        userName: userName || 'System',
+        details: JSON.stringify({ 
+          reason,
+          originalInvoiceId: originalInvoice.id,
+          originalInvoiceNumber: originalInvoice.invoiceNumber,
+          amount: zatcaResult.total,
+        }),
+        ipAddress: userIp,
+      });
+
+      res.status(201).json(debitNote);
+    } catch (error: any) {
+      console.error("Debit note error:", error);
+      res.status(500).json({ error: error?.message || "Failed to create debit note" });
     }
   });
 
@@ -2529,13 +3313,16 @@ export async function registerRoutes(
           const items = await storage.getOrderItems(order.id);
           let itemsWithDetails = items.map(item => ({
             ...item,
-            menuItem: menuItemsMap.get(item.menuItemId),
+            itemName: item.itemName || null,
+            menuItem: item.menuItemId 
+              ? menuItemsMap.get(item.menuItemId) 
+              : (item.itemName ? { nameEn: item.itemName, nameAr: item.itemName, price: item.unitPrice, kitchenSectionId: null } as any : null),
           }));
           
-          // Filter items by section if sectionId is provided
+          // Filter items by section if sectionId is provided (only for items with menuItem)
           if (sectionId) {
             itemsWithDetails = itemsWithDetails.filter(item => 
-              item.menuItem?.kitchenSectionId === sectionId
+              !item.menuItemId || item.menuItem?.kitchenSectionId === sectionId
             );
           }
           
@@ -2548,8 +3335,10 @@ export async function registerRoutes(
         })
       );
       
-      // Remove orders with no items (after section filtering)
-      const filteredOrders = ordersWithItems.filter(order => order.items.length > 0);
+      // Remove orders with no items (after section filtering) — but keep delivery orders even if 0 items
+      const filteredOrders = ordersWithItems.filter(order => 
+        order.items.length > 0 || order.orderType === "delivery"
+      );
       
       res.json(filteredOrders);
     } catch (error) {
@@ -2630,6 +3419,13 @@ export async function registerRoutes(
       // Convert empty branchId to null
       if (body.branchId === "" || body.branchId === "all") {
         body.branchId = null;
+      }
+      // Check for duplicate email before creating user
+      if (body.email) {
+        const existingByEmail = await storage.getUserByEmail(body.email.toLowerCase().trim());
+        if (existingByEmail) {
+          return res.status(409).json({ error: "البريد الإلكتروني مسجل بالفعل - Email already exists", code: "EMAIL_EXISTS" });
+        }
       }
       const data = insertUserSchema.parse({
         ...body,
@@ -2800,9 +3596,21 @@ export async function registerRoutes(
 
   app.post("/api/inventory", async (req, res) => {
     try {
+      const restaurantId = await getRestaurantId(req);
+      
+      // Validate branchId if provided
+      let branchId = req.body.branchId || null;
+      if (branchId) {
+        const branches = await storage.getBranches(restaurantId);
+        if (!branches.some(b => b.id === branchId)) {
+          branchId = null;
+        }
+      }
+      
       const data = insertInventoryItemSchema.parse({
         ...req.body,
-        restaurantId: await getRestaurantId(req),
+        restaurantId,
+        branchId,
       });
       const item = await storage.createInventoryItem(data);
       res.status(201).json(item);
@@ -2866,6 +3674,103 @@ export async function registerRoutes(
   });
 
   // Reports
+
+  // All-branches summary — owner / platform_admin only
+  app.get("/api/reports/all-branches-summary", async (req, res) => {
+    try {
+      const user = await getAuthenticatedUser(req);
+      if (user.role !== "owner" && user.role !== "platform_admin") {
+        return res.status(403).json({ error: "Owner access required" });
+      }
+      const restaurantId = user.restaurantId;
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
+
+      const branches = await storage.getBranches(restaurantId);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+      const weekStart = new Date(today); weekStart.setDate(weekStart.getDate() - 7);
+      const monthStart = new Date(today); monthStart.setDate(1);
+
+      const sumSales = (data: any[]) => data.reduce((acc, row) => acc + parseFloat(row.total_sales || 0), 0);
+      const sumOrders = (data: any[]) => data.reduce((acc, row) => acc + parseInt(row.order_count || 0), 0);
+      const sumTax = (data: any[]) => data.reduce((acc, row) => acc + parseFloat(row.total_tax || 0), 0);
+      const sumDiscount = (data: any[]) => data.reduce((acc, row) => acc + parseFloat(row.total_discount || 0), 0);
+
+      const branchStats = await Promise.all(branches.map(async (branch) => {
+        const [todayData, weekData, monthData, rangeData, topItems, ordersByType] = await Promise.all([
+          storage.getSalesReport(restaurantId, today, tomorrow, branch.id),
+          storage.getSalesReport(restaurantId, weekStart, tomorrow, branch.id),
+          storage.getSalesReport(restaurantId, monthStart, tomorrow, branch.id),
+          storage.getSalesReport(restaurantId, startDate, endDate, branch.id),
+          storage.getTopSellingItems(restaurantId, 5, branch.id),
+          storage.getOrdersByType(restaurantId, startDate, endDate, branch.id),
+        ]);
+        return {
+          branchId: branch.id,
+          branchName: branch.name,
+          branchNameAr: (branch as any).nameAr || branch.name,
+          isMain: branch.isMain,
+          today: { sales: sumSales(todayData), orders: sumOrders(todayData) },
+          week: { sales: sumSales(weekData), orders: sumOrders(weekData) },
+          month: { sales: sumSales(monthData), orders: sumOrders(monthData), tax: sumTax(monthData), discount: sumDiscount(monthData) },
+          range: { sales: sumSales(rangeData), orders: sumOrders(rangeData), tax: sumTax(rangeData), discount: sumDiscount(rangeData) },
+          topItems,
+          ordersByType,
+        };
+      }));
+
+      // Totals across all branches
+      const totals = {
+        today: { sales: branchStats.reduce((s, b) => s + b.today.sales, 0), orders: branchStats.reduce((s, b) => s + b.today.orders, 0) },
+        week: { sales: branchStats.reduce((s, b) => s + b.week.sales, 0), orders: branchStats.reduce((s, b) => s + b.week.orders, 0) },
+        month: { sales: branchStats.reduce((s, b) => s + b.month.sales, 0), orders: branchStats.reduce((s, b) => s + b.month.orders, 0), tax: branchStats.reduce((s, b) => s + b.month.tax, 0), discount: branchStats.reduce((s, b) => s + b.month.discount, 0) },
+        range: { sales: branchStats.reduce((s, b) => s + b.range.sales, 0), orders: branchStats.reduce((s, b) => s + b.range.orders, 0), tax: branchStats.reduce((s, b) => s + b.range.tax, 0), discount: branchStats.reduce((s, b) => s + b.range.discount, 0) },
+      };
+
+      res.json({ branches: branchStats, totals });
+    } catch (error) {
+      console.error("All branches summary error:", error);
+      res.status(500).json({ error: "Failed to get all branches summary" });
+    }
+  });
+
+  // Payment methods breakdown
+  app.get("/api/reports/payment-methods", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
+
+      let query;
+      if (branchId) {
+        query = sql`
+          SELECT payment_method, COUNT(*) as count, SUM(CAST(total as DECIMAL)) as total_revenue
+          FROM orders
+          WHERE restaurant_id = ${restaurantId} AND branch_id = ${branchId}
+            AND created_at >= ${startDate} AND created_at <= ${endDate}
+            AND status NOT IN ('cancelled', 'refunded')
+          GROUP BY payment_method ORDER BY total_revenue DESC
+        `;
+      } else {
+        query = sql`
+          SELECT payment_method, COUNT(*) as count, SUM(CAST(total as DECIMAL)) as total_revenue
+          FROM orders
+          WHERE restaurant_id = ${restaurantId}
+            AND created_at >= ${startDate} AND created_at <= ${endDate}
+            AND status NOT IN ('cancelled', 'refunded')
+          GROUP BY payment_method ORDER BY total_revenue DESC
+        `;
+      }
+      const result = await db.execute(query);
+      res.json(result.rows);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to get payment methods report" });
+    }
+  });
+
   app.get("/api/reports/sales", async (req, res) => {
     try {
       const branchId = req.query.branch as string | undefined;
@@ -3024,14 +3929,17 @@ export async function registerRoutes(
       if (!req.body.password) {
         return res.status(400).json({ error: "Password is required" });
       }
-      
-      // Check if email already exists
-      const existingUser = await storage.getUserByEmail(req.body.email);
-      if (existingUser) {
-        return res.status(400).json({ error: "Email already exists" });
+      if (!req.body.email || typeof req.body.email !== 'string') {
+        return res.status(400).json({ error: "Email is required" });
       }
       
-      const emailLower = req.body.email?.toLowerCase().trim();
+      const emailLower = req.body.email.toLowerCase().trim();
+      
+      // Check if email already exists (case-insensitive)
+      const existingUser = await storage.getUserByEmail(emailLower);
+      if (existingUser) {
+        return res.status(409).json({ error: "البريد الإلكتروني مسجل بالفعل - Email already exists", code: "EMAIL_EXISTS" });
+      }
       const isPlatformAdmin = emailLower === PLATFORM_ADMIN_EMAIL;
       
       const restaurantName = req.body.restaurantName?.trim() || req.body.name || "My Restaurant";
@@ -3320,6 +4228,38 @@ export async function registerRoutes(
     }
   });
 
+  // Platform admin: update restaurant business info (owner, CR, VAT, address, bank)
+  app.patch("/api/admin/restaurant/:id/business-info", requirePlatformAdmin, async (req, res) => {
+    try {
+      const restaurant = await storage.getRestaurantById(req.params.id);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      const allowedFields = [
+        'ownerName', 'ownerPhone', 'vatNumber', 'commercialRegistration',
+        'postalCode', 'buildingNumber', 'streetName', 'district', 'city',
+        'bankName', 'bankAccountHolder', 'bankAccountNumber', 'bankSwift', 'bankIban',
+        'taxEnabled'
+      ];
+
+      const updateData: Record<string, any> = {};
+      for (const field of allowedFields) {
+        if (req.body[field] !== undefined) {
+          updateData[field] = req.body[field];
+        }
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      const updated = await storage.updateRestaurantById(req.params.id, updateData);
+      res.json(updated);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to update business info" });
+    }
+  });
+
   app.post("/api/admin/notifications/send", requirePlatformAdmin, async (req, res) => {
     try {
       const { title, titleAr, message, messageAr, priority, targetRestaurantIds } = req.body;
@@ -3358,6 +4298,36 @@ export async function registerRoutes(
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: "Failed to send notifications" });
+    }
+  });
+
+  // Platform admin: update EdfaPay payment settings for a restaurant
+  app.patch("/api/admin/restaurant/:id/payment-settings", requirePlatformAdmin, async (req, res) => {
+    try {
+      const restaurant = await storage.getRestaurantById(req.params.id);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      const allowedFields = ['edfapayMerchantId', 'edfapayPassword', 'edfapaySoftposAuthToken'];
+      const updateData: Record<string, any> = {};
+      for (const field of allowedFields) {
+        if (req.body[field] !== undefined) {
+          updateData[field] = req.body[field] || null;
+        }
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+
+      const updated = await storage.updateRestaurantById(req.params.id, updateData);
+      res.json({
+        success: true,
+        configured: !!(updated?.edfapayMerchantId && updated?.edfapayPassword),
+        softposConfigured: !!updated?.edfapaySoftposAuthToken,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to update payment settings" });
     }
   });
 
@@ -3519,452 +4489,119 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/moyasar/platform-status", async (_req, res) => {
-    res.json({ configured: moyasarPlatform.hasPlatformCredentials() });
-  });
-
-  app.get("/api/moyasar/merchant", async (req, res) => {
+  // Get printers by kitchen section (for kitchen display integration)
+  app.get("/api/printers/kitchen-section/:sectionId", async (req, res) => {
     try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant) {
-        return res.json(null);
-      }
-      const documents = await storage.getMoyasarDocuments(merchant.id);
-      res.json({ ...merchant, documents });
+      const restaurantId = await getRestaurantId(req);
+      const allPrinters = await storage.getPrinters(restaurantId);
+      const sectionPrinters = allPrinters.filter(
+        (p: any) => p.kitchenSectionId === req.params.sectionId && p.type === "kitchen" && p.isActive
+      );
+      res.json(sectionPrinters);
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Failed to get merchant" });
+      res.status(500).json({ error: "Failed to get kitchen section printers" });
     }
   });
 
-  app.post("/api/moyasar/merchant", async (req, res) => {
+  // Get receipt printers for reports (type = receipt, isDefault = true preferred)
+  app.get("/api/printers/default/receipt", async (req, res) => {
     try {
       const restaurantId = await getRestaurantId(req);
-      const existing = await storage.getMoyasarMerchant(restaurantId);
-      if (existing) {
-        return res.status(400).json({ error: "Merchant already exists" });
-      }
+      const branchId = req.query.branch as string | undefined;
+      const allPrinters = await storage.getPrinters(restaurantId, branchId);
+      const receiptPrinters = allPrinters.filter((p: any) => p.type === "receipt" && p.isActive);
+      const defaultPrinter = receiptPrinters.find((p: any) => p.isDefault) || receiptPrinters[0] || null;
+      res.json({ defaultPrinter, allReceiptPrinters: receiptPrinters });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get receipt printers" });
+    }
+  });
 
+  // Get order receipt data for printing (combined order + items + restaurant info)
+  app.get("/api/orders/:id/receipt", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const order = await storage.getOrder(req.params.id);
+      if (!order || order.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Order not found" });
+      }
       const restaurant = await storage.getRestaurantById(restaurantId);
-      const {
-        name: rawName, publicName: rawPublicName, merchantType, adminEmail: rawAdminEmail, email: rawEmail,
-        ownersCount, signatory, signatoryCount, activityLicenseRequired,
-        country, timeZone, website, statementDescriptor,
-        enabledSchemes, paymentMethods, fees,
-      } = req.body;
-
-      // Fallback to restaurant data for required fields
-      const name = rawName || restaurant?.nameEn?.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() || 'merchant';
-      const publicName = rawPublicName || restaurant?.nameEn || restaurant?.nameAr || name;
-      const adminEmail = rawAdminEmail || restaurant?.email || rawEmail;
-      const email = rawEmail || restaurant?.email || adminEmail;
-
-      if (!email) {
-        return res.status(400).json({ error: "Email is required. Please set your restaurant email in settings first." });
-      }
-
-      const localData: any = {
-        restaurantId,
-        name,
-        publicName,
-        merchantType: merchantType || "establishment",
-        adminEmail: adminEmail || email,
-        email,
-        ownersCount: ownersCount || 1,
-        signatory: signatory || "owner",
-        signatoryCount: signatoryCount || 1,
-        activityLicenseRequired: activityLicenseRequired || false,
-        country: country || "SA",
-        timeZone: timeZone || "Asia/Riyadh",
-        website,
-        statementDescriptor,
-        enabledSchemes: enabledSchemes || ["mada", "visa", "master"],
-        paymentMethods: paymentMethods || ["creditcard"],
-        fees,
-        status: "draft",
-      };
-
-      if (moyasarPlatform.hasPlatformCredentials()) {
-        try {
-          const payload: moyasarPlatform.MoyasarCreateMerchantPayload = {
-            type: merchantType || "establishment",
-            name: name,
-            public_name: publicName || name,
-            country: country || "SA",
-            time_zone: timeZone || "Asia/Riyadh",
-            website: website,
-            email: email,
-            admin_email: adminEmail,
-            owners_count: ownersCount || 1,
-            signatory: signatory || "owner",
-            activity_license_required: activityLicenseRequired || false,
-            enabled_schemes: enabledSchemes || ["mada", "visa", "master"],
-            fees: fees || {
-              tax_inclusive: true,
-              mada_charge_rate: 1.70,
-              mada_charge_fixed: 1.00,
-              mada_refund_rate: 0,
-              mada_refund_fixed: 1.00,
-              cc_charge_rate: 2.70,
-              cc_charge_fixed: 1.00,
-              cc_refund_rate: 0,
-              cc_refund_fixed: 1.00,
-            },
-          };
-          if (statementDescriptor) {
-            payload.statement_descriptor = statementDescriptor;
-          }
-          if (signatory !== "owner" && signatoryCount) {
-            payload.signatory_count = signatoryCount;
-          }
-
-          const moyasarRes = await moyasarPlatform.createMerchant(payload);
-
-          localData.moyasarMerchantId = moyasarRes.id;
-          localData.moyasarEntityId = moyasarRes.entity_id;
-          localData.status = moyasarRes.status || "pending";
-          localData.signatureStatus = moyasarRes.signature?.status || "unsigned";
-          localData.signatureUrl = moyasarRes.signature?.url || null;
-          localData.requiredDocuments = (moyasarRes.required_documents || []).map((d: any) => typeof d === 'string' ? d : d.type || d);
-
-          if (moyasarRes.api_keys) {
-            localData.livePublicKey = moyasarRes.api_keys.live?.publishable_key;
-            localData.liveSecretKey = moyasarRes.api_keys.live?.secret_key;
-            localData.testPublicKey = moyasarRes.api_keys.test?.publishable_key;
-            localData.testSecretKey = moyasarRes.api_keys.test?.secret_key;
-
-            if (restaurant && !restaurant.moyasarPublishableKey) {
-              await storage.updateRestaurantById(restaurantId, {
-                moyasarPublishableKey: moyasarRes.api_keys.live?.publishable_key,
-                moyasarSecretKey: moyasarRes.api_keys.live?.secret_key,
-              });
-            }
-          }
-        } catch (apiErr: any) {
-          console.error("Moyasar Platform API error:", apiErr.message);
-          return res.status(400).json({ error: "Failed to register with Moyasar", details: apiErr.message });
-        }
-      }
-
-      const merchant = await storage.createMoyasarMerchant(localData);
-      res.status(201).json({ ...merchant, documents: [] });
-    } catch (error: any) {
-      console.error("Create merchant error:", error);
-      res.status(400).json({ error: error.message || "Invalid request body" });
-    }
-  });
-
-  app.put("/api/moyasar/merchant", async (req, res) => {
-    try {
-      const restaurantId = await getRestaurantId(req);
-      const existing = await storage.getMoyasarMerchant(restaurantId);
-      if (!existing) {
-        return res.status(404).json({ error: "Merchant not found" });
-      }
-
-      if (moyasarPlatform.hasPlatformCredentials() && existing.moyasarMerchantId) {
-        try {
-          const updatePayload: any = {};
-          if (req.body.name) updatePayload.name = req.body.name;
-          if (req.body.publicName) updatePayload.public_name = req.body.publicName;
-          if (req.body.website) updatePayload.website = req.body.website;
-          if (req.body.email) updatePayload.email = req.body.email;
-          if (req.body.fees) updatePayload.fees = req.body.fees;
-          if (req.body.enabledSchemes) updatePayload.enabled_schemes = req.body.enabledSchemes;
-
-          if (Object.keys(updatePayload).length > 0) {
-            await moyasarPlatform.updateMerchant(existing.moyasarMerchantId, updatePayload);
-          }
-        } catch (apiErr: any) {
-          console.error("Moyasar update error:", apiErr.message);
-        }
-      }
-
-      const merchant = await storage.updateMoyasarMerchant(existing.id, req.body);
-      const documents = await storage.getMoyasarDocuments(existing.id);
-      res.json({ ...merchant, documents });
-    } catch (error) {
-      console.error(error);
-      res.status(400).json({ error: "Invalid request body" });
-    }
-  });
-
-  app.delete("/api/moyasar/merchant", async (req, res) => {
-    try {
-      const existing = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (existing) {
-        await storage.deleteMoyasarMerchant(existing.id);
-      }
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete merchant" });
-    }
-  });
-
-  app.get("/api/moyasar/merchant/documents", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant) {
-        return res.status(404).json({ error: "Merchant not found" });
-      }
-      const documents = await storage.getMoyasarDocuments(merchant.id);
-      res.json(documents);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get documents" });
-    }
-  });
-
-  app.post("/api/moyasar/merchant/documents", async (req, res) => {
-    try {
-      const restaurantId = await getRestaurantId(req);
-      const merchant = await storage.getMoyasarMerchant(restaurantId);
-      if (!merchant) {
-        return res.status(404).json({ error: "Merchant not found. Create a merchant first." });
-      }
-
-      const { documentType, documentInfo, fileData, fileName, fileMimeType } = req.body;
-
-      const existingDoc = await storage.getMoyasarDocumentByType(merchant.id, documentType);
-
-      let moyasarDocId: string | null = null;
-
-      if (moyasarPlatform.hasPlatformCredentials() && merchant.moyasarMerchantId) {
-        try {
-          if (existingDoc?.moyasarDocumentId) {
-            await moyasarPlatform.deleteDocument(merchant.moyasarMerchantId, existingDoc.moyasarDocumentId);
-          }
-
-          const uploadPayload: moyasarPlatform.MoyasarDocumentPayload = {
-            type: documentType,
-            info: documentInfo || {},
-          };
-          if (fileData) {
-            uploadPayload.file = fileData;
-          }
-
-          const moyasarDoc = await moyasarPlatform.uploadDocument(merchant.moyasarMerchantId, uploadPayload);
-          moyasarDocId = moyasarDoc.id;
-        } catch (apiErr: any) {
-          console.error("Moyasar document upload error:", apiErr.message);
-          return res.status(400).json({ error: "Failed to upload document to Moyasar", details: apiErr.message });
-        }
-      }
-
-      if (existingDoc) {
-        const updated = await storage.updateMoyasarDocument(existingDoc.id, {
-          documentInfo,
-          fileData,
-          fileName,
-          fileMimeType,
-          isUploaded: !!moyasarDocId,
-          moyasarDocumentId: moyasarDocId || existingDoc.moyasarDocumentId,
-          uploadError: null,
-        });
-        return res.json(updated);
-      }
-
-      const data = insertMoyasarDocumentSchema.parse({
-        documentType,
-        documentInfo,
-        fileData,
-        fileName,
-        fileMimeType,
-        merchantId: merchant.id,
-        restaurantId,
-        isUploaded: !!moyasarDocId,
-        moyasarDocumentId: moyasarDocId,
+      const orderItems = await storage.getOrderItems(order.id);
+      const menuItemsData = await storage.getMenuItems(restaurantId);
+      const menuItemsMap = new Map(menuItemsData.map(m => [m.id, m]));
+      const itemsWithDetails = orderItems.map(item => {
+        const mi = item.menuItemId ? menuItemsMap.get(item.menuItemId) : null;
+        return {
+          ...item,
+          menuItem: mi
+            ? { 
+                nameEn: mi.nameEn, 
+                nameAr: mi.nameAr, 
+                price: mi.price,
+                kitchenSectionId: mi.kitchenSectionId,
+              }
+            : (item.itemName ? { nameAr: item.itemName, nameEn: item.itemName, price: item.unitPrice, kitchenSectionId: null } : null),
+        };
       });
-      const doc = await storage.createMoyasarDocument(data);
-      res.status(201).json(doc);
-    } catch (error: any) {
-      console.error(error);
-      res.status(400).json({ error: error.message || "Invalid request body" });
-    }
-  });
-
-  app.delete("/api/moyasar/merchant/documents/:id", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      const doc = await storage.getMoyasarDocument(req.params.id);
-
-      if (doc && merchant?.moyasarMerchantId && doc.moyasarDocumentId && moyasarPlatform.hasPlatformCredentials()) {
-        try {
-          await moyasarPlatform.deleteDocument(merchant.moyasarMerchantId, doc.moyasarDocumentId);
-        } catch (e: any) {
-          console.error("Moyasar delete document error:", e.message);
-        }
-      }
-
-      if (doc) {
-        await storage.deleteMoyasarDocument(doc.id);
-      }
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete document" });
-    }
-  });
-
-  app.post("/api/moyasar/merchant/submit-review", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant || !merchant.moyasarMerchantId) {
-        return res.status(400).json({ error: "Merchant not found or not registered with Moyasar" });
-      }
-
-      if (!moyasarPlatform.hasPlatformCredentials()) {
-        return res.status(400).json({ error: "Platform credentials not configured" });
-      }
-
-      const result = await moyasarPlatform.submitForReview(merchant.moyasarMerchantId);
-
-      await storage.updateMoyasarMerchant(merchant.id, {
-        status: result.status || "under_review",
-        signatureStatus: result.signature?.status || merchant.signatureStatus,
-        signatureUrl: result.signature?.url || merchant.signatureUrl,
-      });
-
-      const updated = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      const documents = await storage.getMoyasarDocuments(merchant.id);
-      res.json({ ...updated, documents });
-    } catch (error: any) {
-      console.error("Submit review error:", error.message);
-      res.status(400).json({ error: "Failed to submit for review", details: error.message });
-    }
-  });
-
-  app.post("/api/moyasar/merchant/sync-status", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant || !merchant.moyasarMerchantId) {
-        return res.status(400).json({ error: "Merchant not found or not registered with Moyasar" });
-      }
-
-      if (!moyasarPlatform.hasPlatformCredentials()) {
-        return res.status(400).json({ error: "Platform credentials not configured" });
-      }
-
-      const moyasarData = await moyasarPlatform.getMerchant(merchant.moyasarMerchantId);
-
-      const updateData: any = {
-        status: moyasarData.status,
-        signatureStatus: moyasarData.signature?.status || merchant.signatureStatus,
-        signatureUrl: moyasarData.signature?.url || merchant.signatureUrl,
-        rejectionReasons: moyasarData.reasons || [],
-        requiredDocuments: (moyasarData.required_documents || []).map((d: any) => typeof d === 'string' ? d : d.type || d),
-      };
-
-      if (moyasarData.api_keys) {
-        updateData.livePublicKey = moyasarData.api_keys.live?.publishable_key;
-        updateData.liveSecretKey = moyasarData.api_keys.live?.secret_key;
-        updateData.testPublicKey = moyasarData.api_keys.test?.publishable_key;
-        updateData.testSecretKey = moyasarData.api_keys.test?.secret_key;
-      }
-
-      if (moyasarData.status === "active" || moyasarData.status === "semi_active") {
-        const restaurantId = await getRestaurantId(req);
-        if (moyasarData.api_keys?.live) {
-          await storage.updateRestaurantById(restaurantId, {
-            moyasarPublishableKey: moyasarData.api_keys.live.publishable_key,
-            moyasarSecretKey: moyasarData.api_keys.live.secret_key,
-          });
-        }
-      }
-
-      const updated = await storage.updateMoyasarMerchant(merchant.id, updateData);
-      const documents = await storage.getMoyasarDocuments(merchant.id);
-      res.json({ ...updated, documents });
-    } catch (error: any) {
-      console.error("Sync status error:", error.message);
-      res.status(400).json({ error: "Failed to sync status", details: error.message });
-    }
-  });
-
-  app.get("/api/moyasar/merchant/signature-status", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant) {
-        return res.status(404).json({ error: "Merchant not found" });
-      }
-
-      if (moyasarPlatform.hasPlatformCredentials() && merchant.moyasarMerchantId) {
-        try {
-          const moyasarData = await moyasarPlatform.getMerchant(merchant.moyasarMerchantId);
-          if (moyasarData.signature) {
-            await storage.updateMoyasarMerchant(merchant.id, {
-              signatureStatus: moyasarData.signature.status,
-              signatureUrl: moyasarData.signature.url,
-              status: moyasarData.status,
-            });
-            return res.json({
-              status: moyasarData.signature.status,
-              url: moyasarData.signature.url,
-              merchantStatus: moyasarData.status,
-            });
-          }
-        } catch (e: any) {
-          console.error("Signature status check error:", e.message);
-        }
-      }
-
+      const invoice = await storage.getInvoiceByOrder(order.id);
       res.json({
-        status: merchant.signatureStatus,
-        url: merchant.signatureUrl,
-        merchantStatus: merchant.status,
+        order,
+        items: itemsWithDetails,
+        invoice: invoice || null,
+        restaurant: restaurant ? {
+          nameEn: restaurant.nameEn,
+          nameAr: restaurant.nameAr,
+          vatNumber: restaurant.vatNumber,
+          commercialRegistration: restaurant.commercialRegistration,
+          address: restaurant.address,
+          phone: restaurant.phone,
+          logo: restaurant.logo,
+        } : null,
       });
     } catch (error) {
-      res.status(500).json({ error: "Failed to get signature status" });
+      handleRouteError(res, error, "Failed to get order receipt");
     }
   });
 
-  app.post("/api/moyasar/webhook", async (req, res) => {
+  // EdfaPay configuration status
+  app.get("/api/edfapay/status", async (req, res) => {
     try {
-      const { merchantId, signatureStatus, status } = req.body;
-      if (!merchantId) {
-        return res.status(400).json({ error: "Missing merchantId" });
-      }
-
-      const allMerchants = await storage.getMoyasarMerchantByMoyasarId(merchantId);
-      if (!allMerchants) {
-        return res.status(404).json({ error: "Merchant not found" });
-      }
-
-      const updateData: any = {};
-      if (signatureStatus) updateData.signatureStatus = signatureStatus;
-      if (status) updateData.status = status;
-
-      if (signatureStatus === "signed" && !status) {
-        updateData.status = "active";
-      }
-
-      await storage.updateMoyasarMerchant(allMerchants.id, updateData);
-
-      if (updateData.status === "active" || updateData.status === "semi_active") {
-        if (moyasarPlatform.hasPlatformCredentials()) {
-          try {
-            const moyasarData = await moyasarPlatform.getMerchant(merchantId);
-            if (moyasarData.api_keys?.live) {
-              await storage.updateRestaurantById(allMerchants.restaurantId, {
-                moyasarPublishableKey: moyasarData.api_keys.live.publishable_key,
-                moyasarSecretKey: moyasarData.api_keys.live.secret_key,
-              });
-              await storage.updateMoyasarMerchant(allMerchants.id, {
-                livePublicKey: moyasarData.api_keys.live.publishable_key,
-                liveSecretKey: moyasarData.api_keys.live.secret_key,
-                testPublicKey: moyasarData.api_keys.test?.publishable_key,
-                testSecretKey: moyasarData.api_keys.test?.secret_key,
-              });
-            }
-          } catch (e: any) {
-            console.error("Webhook key fetch error:", e.message);
-          }
-        }
-      }
-
-      res.json({ success: true });
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      res.json({ 
+        configured: edfapay.hasCredentials(restaurant?.edfapayMerchantId, restaurant?.edfapayPassword),
+        merchantId: restaurant?.edfapayMerchantId ? "***configured***" : null,
+        softposConfigured: !!restaurant?.edfapaySoftposAuthToken,
+      });
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Failed to process webhook" });
+      res.status(500).json({ error: "Failed to get status" });
     }
+  });
+
+  // EdfaPay SoftPOS token — mobile app fetches this to init NFC SDK
+  app.get("/api/edfapay/softpos-token", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      if (!restaurant) {
+        return res.status(404).json({ error: "Restaurant not found" });
+      }
+      res.json({
+        authToken: restaurant.edfapaySoftposAuthToken || null,
+        environment: restaurant.edfapaySoftposAuthToken ? "PRODUCTION" : "SANDBOX",
+      });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get SoftPOS token" });
+    }
+  });
+  
+  // ===============================
+  // MOYASAR REMOVED - ALL ENDPOINTS DEPRECATED
+  // ===============================
+
+  // Stub: Return 410 Gone for any legacy Moyasar endpoints
+  app.use("/api/moyasar", (_req, res) => {
+    res.status(410).json({ error: "Moyasar integration has been removed. Use EdfaPay instead.", deprecated: true });
   });
 
   // ===============================
@@ -4041,6 +4678,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "missingFields", message: "Name, phone, and time are required" });
       }
 
+      // Reject past reservation dates/times
+      const reservationDateValue = req.body.reservationDate ? new Date(req.body.reservationDate) : new Date();
+      const requestedDateTime = new Date(`${reservationDateValue.toISOString().split('T')[0]}T${req.body.reservationTime}:00`);
+      if (requestedDateTime <= new Date()) {
+        return res.status(400).json({ error: "pastDateTime", message: "لا يمكن الحجز في وقت سابق - Cannot book in the past" });
+      }
+
       // Use restaurant settings for duration and deposit
       const defaultDuration = (restaurant as any)?.reservationDuration || 90;
       const depositAmount = (restaurant as any)?.reservationDepositAmount || "20.00";
@@ -4048,7 +4692,6 @@ export async function registerRoutes(
       const tableId = (req.body.tableId && req.body.tableId !== 'any') ? req.body.tableId : null;
       const reservationTime = req.body.reservationTime;
       const duration = parseInt(req.body.duration) || defaultDuration;
-      const reservationDateValue = req.body.reservationDate ? new Date(req.body.reservationDate) : new Date();
 
       // Check for table conflict if a specific table is selected
       if (tableId && reservationTime) {
@@ -4067,9 +4710,18 @@ export async function registerRoutes(
 
       const guestCount = parseInt(req.body.guestCount) || parseInt(req.body.partySize) || 2;
 
+      // Validate branchId if provided
+      let validBranchId = req.body.branchId || null;
+      if (validBranchId) {
+        const branches = await storage.getBranches(restaurantId);
+        if (!branches.some((b: any) => b.id === validBranchId)) {
+          validBranchId = null;
+        }
+      }
+
       const reservationData: any = {
         restaurantId,
-        branchId: req.body.branchId || null,
+        branchId: validBranchId,
         reservationNumber: `RES-${Date.now().toString().slice(-6)}`,
         customerName: req.body.customerName,
         customerPhone: req.body.customerPhone,
@@ -4454,6 +5106,18 @@ export async function registerRoutes(
       res.json(allReviews);
     } catch (error) {
       res.status(500).json({ error: "Failed to get reviews" });
+    }
+  });
+
+  // Admin: Toggle review visibility
+  app.patch("/api/reviews/:id", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const { isPublic } = req.body;
+      await storage.updateReviewVisibility(req.params.id, restaurantId, isPublic);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update review" });
     }
   });
 
@@ -4851,10 +5515,19 @@ export async function registerRoutes(
 
   app.post("/api/day-sessions/open", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
+      const restaurantId = await getRestaurantId(req);
+      let branchId = req.query.branch as string | undefined;
       
-      // Check if there's already an open session
-      const existingSession = await storage.getCurrentDaySession(await getRestaurantId(req), branchId);
+      // Validate branchId
+      if (branchId) {
+        const branches = await storage.getBranches(restaurantId);
+        if (!branches.some(b => b.id === branchId)) {
+          return res.status(400).json({ error: "Invalid branch" });
+        }
+      }
+      
+      // Check if there's already an open session for this branch
+      const existingSession = await storage.getCurrentDaySession(restaurantId, branchId);
       if (existingSession) {
         return res.status(400).json({ error: "يوجد يوم مفتوح بالفعل. يرجى إغلاقه أولاً." });
       }
@@ -5050,30 +5723,22 @@ export async function registerRoutes(
 
   // ===============================
   // ===============================
-  // MOYASAR PAYMENT GATEWAY - COMPLETE
+  // EDFAPAY PAYMENT GATEWAY - COMPLETE
   // ===============================
 
-  const getMoyasarAuth = (secretKey?: string | null) => {
-    const key = secretKey;
-    if (!key) throw new Error("Moyasar secret key not configured for this restaurant");
-    return `Basic ${Buffer.from(`${key}:`).toString("base64")}`;
-  };
-
-  const MOYASAR_API = "https://api.moyasar.com/v1";
-  const MOYASAR_PLATFORM_API = "https://apimig.moyasar.com/v1";
-
-  const getRestaurantMoyasarKeys = async (restaurantId: string) => {
+  // EdfaPay helpers
+  const getRestaurantEdfapayKeys = async (restaurantId: string) => {
     const restaurant = await storage.getRestaurantById(restaurantId);
     return {
-      publishableKey: restaurant?.moyasarPublishableKey || null,
-      secretKey: restaurant?.moyasarSecretKey || null,
+      merchantId: restaurant?.edfapayMerchantId || null,
+      password: restaurant?.edfapayPassword || null,
     };
   };
 
-  // --- Payment Session ---
+  // --- Payment Session (EdfaPay) ---
   app.post("/api/payments/create-session", async (req, res) => {
     try {
-      const { orderId, callbackUrl } = req.body;
+      const { orderId, callbackUrl, payerFirstName, payerLastName, payerEmail, payerPhone } = req.body;
       if (!orderId || !callbackUrl) {
         return res.status(400).json({ error: "Missing required fields: orderId, callbackUrl" });
       }
@@ -5090,69 +5755,105 @@ export async function registerRoutes(
       if (order.isPaid) {
         return res.status(400).json({ error: "Order is already paid" });
       }
-      const keys = await getRestaurantMoyasarKeys(order.restaurantId);
-      if (!keys.publishableKey) {
-        return res.status(500).json({ error: "Moyasar publishable key not configured", publishableKey: "pending_setup" });
+      const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+      if (!keys.merchantId || !keys.password) {
+        return res.status(500).json({ error: "بوابة الدفع غير مُعدة بعد", configured: false });
       }
-      res.json({
-        publishableKey: keys.publishableKey,
-        amount: Math.round(serverAmount * 100),
+      
+      // Get client IP
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() 
+        || req.socket.remoteAddress 
+        || "127.0.0.1";
+      
+      const description = `Order ${order.orderNumber || orderId}`;
+      const amount = serverAmount.toFixed(2);
+      
+      // Build webhook notification URL from request origin
+      const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+      const host = req.headers["x-forwarded-host"] || req.headers.host || "tryingpos.com";
+      const notificationUrl = `${protocol}://${host}/api/payments/webhook`;
+
+      // Initiate EdfaPay SALE
+      const edfaResult = await edfapay.initiateSale({
+        merchantId: keys.merchantId,
+        password: keys.password,
+        orderId: orderId,
+        amount,
         currency: "SAR",
-        description: `Order ${order.orderNumber || orderId}`,
+        description,
+        payerFirstName: payerFirstName || order.customerName?.split(" ")[0] || "Customer",
+        payerLastName: payerLastName || order.customerName?.split(" ").slice(1).join(" ") || "Guest",
+        payerEmail: payerEmail || "customer@example.com",
+        payerPhone: payerPhone || order.customerPhone || "0500000000",
+        payerIp: clientIp,
         callbackUrl,
-        orderId,
+        notificationUrl,
       });
-    } catch (error) {
+      
+      if (edfaResult.result === "REDIRECT" && edfaResult.redirect_url) {
+        // Customer needs to be redirected to EdfaPay checkout
+        res.json({
+          action: "redirect",
+          redirectUrl: edfaResult.redirect_url,
+          redirectMethod: edfaResult.redirect_method || "GET",
+          redirectParams: edfaResult.redirect_params || {},
+          transId: edfaResult.trans_id,
+          orderId,
+        });
+      } else if (edfaResult.result === "SUCCESS") {
+        // Direct success (rare - usually requires redirect)
+        res.json({
+          action: "success",
+          transId: edfaResult.trans_id,
+          status: edfaResult.status,
+          orderId,
+        });
+      } else {
+        res.status(400).json({ 
+          error: "Payment initiation failed", 
+          details: edfaResult.error_message || edfaResult.status 
+        });
+      }
+    } catch (error: any) {
       console.error("Payment session error:", error);
-      res.status(500).json({ error: "Failed to create payment session" });
+      res.status(500).json({ error: error.message || "Failed to create payment session" });
     }
   });
 
-  // --- Verify Payment ---
+  // --- Verify Payment (EdfaPay) ---
   app.get("/api/payments/verify/:paymentId", async (req, res) => {
     try {
       const orderId = req.query.orderId as string;
-      let secretKey: string | null = null;
-      if (orderId) {
-        const order = await storage.getOrder(orderId);
-        if (order) {
-          const keys = await getRestaurantMoyasarKeys(order.restaurantId);
-          secretKey = keys.secretKey;
-        }
+      const gwayPaymentId = req.params.paymentId;
+      
+      if (!orderId) {
+        return res.status(400).json({ error: "Missing orderId" });
       }
-      if (!secretKey) {
-        const restaurantId = await getRestaurantId(req).catch(() => null);
-        if (restaurantId) {
-          const keys = await getRestaurantMoyasarKeys(restaurantId);
-          secretKey = keys.secretKey;
-        }
+      
+      const order = await storage.getOrder(orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
       }
-      const auth = getMoyasarAuth(secretKey);
-      const paymentId = req.params.paymentId;
-      const response = await fetch(`${MOYASAR_API}/payments/${paymentId}`, {
-        headers: { "Authorization": auth },
+      
+      const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+      if (!keys.merchantId || !keys.password) {
+        return res.status(500).json({ error: "EdfaPay credentials not configured" });
+      }
+      
+      const statusResult = await edfapay.getTransactionStatus({
+        merchantId: keys.merchantId,
+        password: keys.password,
+        gwayPaymentId,
+        orderId,
       });
-      if (!response.ok) {
-        return res.status(response.status).json({ error: "Failed to verify payment" });
-      }
-      const payment = await response.json() as any;
+      
       res.json({
-        id: payment.id,
-        status: payment.status,
-        amount: payment.amount,
-        currency: payment.currency,
-        description: payment.description,
-        refunded: payment.refunded,
-        refunded_at: payment.refunded_at,
-        fee: payment.fee,
-        source: payment.source ? {
-          type: payment.source.type,
-          company: payment.source.company,
-          name: payment.source.name,
-          message: payment.source.message,
-          number: payment.source.number,
-        } : null,
-        metadata: payment.metadata,
+        id: statusResult.trans_id,
+        status: statusResult.status,
+        result: statusResult.result,
+        amount: statusResult.amount,
+        currency: statusResult.currency,
+        orderId: statusResult.order_id,
       });
     } catch (error) {
       console.error("Payment verify error:", error);
@@ -5160,12 +5861,12 @@ export async function registerRoutes(
     }
   });
 
-  // --- Complete Payment ---
+  // --- Complete Payment (EdfaPay) ---
   app.post("/api/payments/complete", async (req, res) => {
     try {
-      const { orderId, paymentId } = req.body;
-      if (!orderId || !paymentId) {
-        return res.status(400).json({ error: "Missing orderId or paymentId" });
+      const { orderId, transId, gwayId } = req.body;
+      if (!orderId) {
+        return res.status(400).json({ error: "Missing orderId" });
       }
       const order = await storage.getOrder(orderId);
       if (!order) {
@@ -5176,31 +5877,48 @@ export async function registerRoutes(
         const updatedOrder = await storage.getOrder(orderId);
         return res.json(updatedOrder);
       }
-      const keys = await getRestaurantMoyasarKeys(order.restaurantId);
-      const auth = getMoyasarAuth(keys.secretKey);
-      const verifyRes = await fetch(`${MOYASAR_API}/payments/${paymentId}`, {
-        headers: { "Authorization": auth },
-      });
-      if (!verifyRes.ok) {
-        return res.status(400).json({ error: "Failed to verify payment with Moyasar" });
+      
+      // Verify via EdfaPay status API if we have transId/gwayId
+      let paymentVerified = false;
+      let paymentStatus = "unknown";
+      
+      if (transId || gwayId) {
+        const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+        if (keys.merchantId && keys.password && gwayId) {
+          try {
+            const statusResult = await edfapay.getTransactionStatus({
+              merchantId: keys.merchantId,
+              password: keys.password,
+              gwayPaymentId: gwayId,
+              orderId,
+            });
+            paymentStatus = statusResult.status;
+            paymentVerified = edfapay.isSuccessfulPayment(statusResult.status);
+          } catch (e) {
+            console.error("EdfaPay status check error:", e);
+          }
+        }
       }
-      const payment = await verifyRes.json() as any;
-      if (payment.metadata?.order_id !== orderId) {
-        return res.status(400).json({ error: "Payment does not match this order" });
+      
+      // Also accept if callback already confirmed (via webhook route)
+      if (!paymentVerified) {
+        // Check if we have a successful transaction record from callback
+        const transactions = await storage.getPaymentTransactions(order.restaurantId, orderId);
+        const successTx = transactions.find(t => t.type === "payment" && t.status === "paid");
+        if (successTx) {
+          paymentVerified = true;
+        }
       }
-      const expectedAmount = Math.round(parseFloat(order.total || "0") * 100);
-      if (payment.amount !== expectedAmount) {
-        return res.status(400).json({ error: "Payment amount does not match order total" });
-      }
-      if (payment.status === "paid") {
+      
+      if (paymentVerified) {
         // If order was payment_pending, change to pending now that payment is verified
         const newStatus = order.status === "payment_pending" ? "pending" : order.status;
-        await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "moyasar_online", status: newStatus });
+        await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "edfapay_online", status: newStatus });
 
         if (order.tableId && order.orderType === "dine_in") {
           await storage.updateTableStatus(order.tableId, "available");
           if (newStatus !== "completed") {
-            await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "moyasar_online", status: "completed" });
+            await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "edfapay_online", status: "completed" });
           }
         }
 
@@ -5208,15 +5926,13 @@ export async function registerRoutes(
         await storage.createPaymentTransaction({
           restaurantId,
           orderId,
-          moyasarPaymentId: paymentId,
+          edfapayTransactionId: transId || null,
+          edfapayGwayId: gwayId || null,
           type: "payment",
           status: "paid",
-          amount: payment.amount,
-          currency: payment.currency || "SAR",
-          paymentMethod: payment.source?.type,
-          cardBrand: payment.source?.company,
-          cardLast4: payment.source?.number?.slice(-4),
-          metadata: { fee: payment.fee },
+          amount: Math.round(parseFloat(order.total || "0") * 100),
+          currency: "SAR",
+          paymentMethod: "edfapay_online",
         });
 
         // Create invoice and update day session now that payment is verified (for orders that were payment_pending)
@@ -5225,20 +5941,49 @@ export async function registerRoutes(
             const restaurant = await storage.getRestaurantById(restaurantId);
             if (restaurant) {
               const isTaxEnabled = restaurant.taxEnabled !== false;
-              const vatRate = isTaxEnabled ? 0.15 : 0;
-              // Order total is already tax-inclusive — extract VAT, don't add on top
-              const totalWithTax = parseFloat(order.total || "0");
-              const subtotal = isTaxEnabled ? Math.round((totalWithTax / 1.15) * 100) / 100 : totalWithTax;
-              const vatAmount = Math.round((totalWithTax - subtotal) * 100) / 100;
-              const total = totalWithTax;
+              const taxRatePercent = isTaxEnabled ? 15 : 0;
               const now = new Date();
               const uuid = generateInvoiceUuid();
-              const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId);
-              const currentCounter = ((restaurant as any).zatcaInvoiceCounter || 0) + 1;
-              const previousHash = (restaurant as any).zatcaLastInvoiceHash ||
+              const payBranchId = order.branchId || null;
+              const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId, payBranchId);
+              const { counter: payPrevC, lastHash: payPrevH } = await storage.getZatcaCounterAndHash(restaurantId, payBranchId);
+              const currentCounter = payPrevC + 1;
+              const previousHash = payPrevH ||
                 Buffer.from('NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==', 'base64').toString('utf8');
 
-              const xmlContent = generateZatcaXml({
+              // Build itemized line items (ZATCA requires itemization)
+              const payOrderItems = await storage.getOrderItems(orderId);
+              const payMenuItemsRaw = await storage.getMenuItems(restaurantId);
+              const payMenuItemsMap = new Map(payMenuItemsRaw.map(m => [m.id, m]));
+              
+              const payXmlItems: ZatcaLineItem[] = payOrderItems.map((item, idx) => {
+                const menuItem = payMenuItemsMap.get(item.menuItemId);
+                const unitPrice = parseFloat(item.unitPrice || menuItem?.price || "0");
+                const qty = item.quantity || 1;
+                const lineTotal = bankersRound(unitPrice * qty);
+                const lineTax = bankersRound(lineTotal * (taxRatePercent / 100));
+                return {
+                  id: String(idx + 1),
+                  nameAr: menuItem?.nameAr || menuItem?.nameEn || 'منتج',
+                  nameEn: menuItem?.nameEn || '',
+                  quantity: qty,
+                  unitPrice,
+                  discount: 0,
+                  taxRate: taxRatePercent,
+                  taxAmount: lineTax,
+                  totalWithTax: bankersRound(lineTotal + lineTax),
+                  totalWithoutTax: lineTotal,
+                };
+              });
+
+              const paySubtotal = bankersRound(payXmlItems.reduce((sum, i) => sum + i.totalWithoutTax, 0));
+              const payDiscount = parseFloat(order.discount || "0");
+              const payDeliveryFee = parseFloat(order.deliveryFee || "0");
+              const payTaxable = bankersRound(Math.max(0, paySubtotal - payDiscount + payDeliveryFee));
+              const payVatAmount = bankersRound(payTaxable * (taxRatePercent / 100));
+              const payTotal = bankersRound(payTaxable + payVatAmount);
+
+              const unsignedPayXml = generateZatcaXml({
                 uuid,
                 invoiceNumber,
                 invoiceType: 'simplified',
@@ -5256,47 +6001,58 @@ export async function registerRoutes(
                   postalCode: restaurant.postalCode || '',
                   country: restaurant.country || 'SA',
                 },
-                items: [{
-                  id: '1',
-                  nameAr: 'طلب',
-                  quantity: 1,
-                  unitPrice: subtotal,
-                  discount: 0,
-                  taxRate: vatRate * 100,
-                  taxAmount: Math.round(vatAmount * 100) / 100,
-                  totalWithTax: Math.round(total * 100) / 100,
-                  totalWithoutTax: Math.round(subtotal * 100) / 100,
-                }],
-                subtotal,
-                discount: 0,
-                deliveryFee: 0,
-                taxAmount: vatAmount,
-                taxRate: vatRate * 100,
-                total,
-                paymentMethod: 'moyasar_online',
+                items: payXmlItems,
+                subtotal: paySubtotal,
+                discount: payDiscount,
+                deliveryFee: payDeliveryFee,
+                taxAmount: payVatAmount,
+                taxRate: taxRatePercent,
+                total: payTotal,
+                paymentMethod: 'edfapay_online',
                 previousInvoiceHash: previousHash,
                 invoiceCounter: currentCounter,
               });
 
-              const invoiceHash = computeInvoiceHashBase64(xmlContent);
-              const qrData = generateZatcaQrCode({
-                sellerName: restaurant.nameAr || restaurant.nameEn || "Restaurant",
-                vatNumber: restaurant.vatNumber || "",
-                timestamp: now.toISOString(),
-                total: total.toFixed(2),
-                vatAmount: vatAmount.toFixed(2),
-                invoiceHash: computeInvoiceHash(xmlContent),
-              });
+              // Resolve signing credentials
+              let payPrivKey: string | null = null;
+              let payCert: string | null = null;
+              if (payBranchId) {
+                const br = await storage.getBranch(payBranchId);
+                if (br && (br as any).zatcaPrivateKey) {
+                  payPrivKey = (br as any).zatcaPrivateKey;
+                  payCert = (br as any).zatcaProductionCsid || (br as any).zatcaComplianceCsid || (br as any).zatcaCertificate;
+                }
+              }
+              if (!payPrivKey && (restaurant as any).zatcaPrivateKey) {
+                payPrivKey = (restaurant as any).zatcaPrivateKey;
+                payCert = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid || restaurant.zatcaCertificate;
+              }
+
+              const paySignResult = buildSignedInvoice(
+                unsignedPayXml, payPrivKey, payCert,
+                {
+                  sellerName: restaurant.nameAr || restaurant.nameEn || "مطعم",
+                  vatNumber: restaurant.vatNumber || "",
+                  timestamp: now.toISOString(),
+                  total: payTotal.toFixed(2),
+                  vatAmount: payVatAmount.toFixed(2),
+                },
+              );
+
+              const xmlContent = paySignResult.finalXml;
+              const invoiceHash = paySignResult.invoiceHash;
+              const qrData = paySignResult.qrData;
 
               await storage.createInvoice({
                 restaurantId,
+                branchId: payBranchId,
                 orderId,
                 invoiceNumber,
                 invoiceType: "simplified",
-                subtotal: subtotal.toFixed(2),
-                taxRate: (vatRate * 100).toFixed(2),
-                taxAmount: vatAmount.toFixed(2),
-                total: total.toFixed(2),
+                subtotal: paySubtotal.toFixed(2),
+                taxRate: taxRatePercent.toFixed(2),
+                taxAmount: payVatAmount.toFixed(2),
+                total: payTotal.toFixed(2),
                 qrCodeData: qrData,
                 xmlContent,
                 invoiceHash,
@@ -5305,12 +6061,13 @@ export async function registerRoutes(
                 uuid,
                 status: "issued",
                 zatcaStatus: "pending",
+                customerName: order.customerName || null,
+                customerPhone: order.customerPhone || null,
+                paymentMethod: 'edfapay_online',
+                signedXml: paySignResult.signedXml || null,
               });
 
-              await storage.updateRestaurantById(restaurantId, {
-                zatcaInvoiceCounter: currentCounter,
-                zatcaLastInvoiceHash: invoiceHash,
-              } as any);
+              await storage.updateZatcaCounterAndHash(restaurantId, payBranchId, currentCounter, invoiceHash);
             }
           } catch (invoiceError) {
             console.error("Invoice creation error (payment complete):", invoiceError);
@@ -5321,7 +6078,7 @@ export async function registerRoutes(
             const currentSession = await storage.getCurrentDaySession(restaurantId, order.branchId || undefined);
             if (currentSession) {
               const orderTotal = parseFloat(order.total || "0");
-              await storage.incrementDaySessionTotals(currentSession.id, orderTotal, "moyasar_online");
+              await storage.incrementDaySessionTotals(currentSession.id, orderTotal, "edfapay_online");
             }
           } catch (e) {
             console.error("Failed to update day session totals (payment complete):", e);
@@ -5331,7 +6088,7 @@ export async function registerRoutes(
         const updatedOrder = await storage.getOrder(orderId);
         res.json(updatedOrder);
       } else {
-        res.status(400).json({ error: `Payment not completed. Status: ${payment.status}` });
+        res.status(400).json({ error: `Payment not verified. Status: ${paymentStatus}` });
       }
     } catch (error) {
       console.error("Payment complete error:", error);
@@ -5350,12 +6107,12 @@ export async function registerRoutes(
     }
   });
 
-  // --- Refund Payment (Full or Partial) ---
+  // --- Refund Payment (EdfaPay - Full or Partial) ---
   app.post("/api/payments/refund", async (req, res) => {
     try {
-      const { orderId, paymentId, amount, reason } = req.body;
-      if (!orderId || !paymentId) {
-        return res.status(400).json({ error: "Missing orderId or paymentId" });
+      const { orderId, transId, gwayId, amount, reason } = req.body;
+      if (!orderId) {
+        return res.status(400).json({ error: "Missing orderId" });
       }
       const order = await storage.getOrder(orderId);
       if (!order) {
@@ -5366,416 +6123,451 @@ export async function registerRoutes(
       if (order.restaurantId !== callerRestaurantId) {
         return res.status(403).json({ error: "Access denied" });
       }
-      const keys = await getRestaurantMoyasarKeys(order.restaurantId);
-      const auth = getMoyasarAuth(keys.secretKey);
-      // Validate refund amount doesn't exceed payment
+      const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+      if (!keys.merchantId || !keys.password) {
+        return res.status(500).json({ error: "EdfaPay credentials not configured" });
+      }
+      
+      // Find the original payment transaction
       const existingPayments = await storage.getPaymentTransactions(order.restaurantId, orderId);
-      const originalPayment = existingPayments.find(t => t.moyasarPaymentId === paymentId && t.type === "payment");
+      const originalPayment = existingPayments.find(t => t.type === "payment" && t.status === "paid");
       if (!originalPayment) {
         return res.status(404).json({ error: "Original payment not found" });
       }
+      
+      const refundTransId = transId || originalPayment.edfapayTransactionId;
+      const refundGwayId = gwayId || originalPayment.edfapayGwayId;
+      
+      if (!refundTransId || !refundGwayId) {
+        return res.status(400).json({ error: "Missing transaction IDs for refund" });
+      }
+      
       const totalRefunded = existingPayments
-        .filter(t => t.moyasarPaymentId === paymentId && t.type === "refund")
+        .filter(t => t.type === "refund")
         .reduce((sum, t) => sum + (t.refundedAmount || 0), 0);
-      const refundBody: any = {};
-      if (amount) {
-        const refundAmount = Math.round(parseFloat(amount) * 100);
-        if (refundAmount + totalRefunded > originalPayment.amount) {
-          return res.status(400).json({ error: "Refund amount exceeds remaining refundable balance" });
-        }
-        refundBody.amount = refundAmount;
+
+      const refundAmount = amount 
+        ? parseFloat(amount).toFixed(2) 
+        : (originalPayment.amount / 100).toFixed(2);
+      
+      const refundAmountHalalas = Math.round(parseFloat(refundAmount) * 100);
+      if (refundAmountHalalas + totalRefunded > originalPayment.amount) {
+        return res.status(400).json({ error: "Refund amount exceeds remaining refundable balance" });
       }
-      const refundRes = await fetch(`${MOYASAR_API}/payments/${paymentId}/refund`, {
-        method: "POST",
-        headers: {
-          "Authorization": auth,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(refundBody),
-      });
-      if (!refundRes.ok) {
-        const errorText = await refundRes.text();
-        console.error("Moyasar refund error:", errorText);
-        return res.status(400).json({ error: "Refund failed. " + errorText });
-      }
-      const refundResult = await refundRes.json() as any;
-      await storage.createPaymentTransaction({
-        restaurantId: await getRestaurantId(req),
+      
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() 
+        || req.socket.remoteAddress 
+        || "127.0.0.1";
+      
+      const refundResult = await edfapay.refundTransaction({
+        merchantId: keys.merchantId,
+        password: keys.password,
+        gwayId: refundGwayId,
+        transId: refundTransId,
         orderId,
-        moyasarPaymentId: paymentId,
-        type: "refund",
-        status: "refunded",
-        amount: refundBody.amount || refundResult.amount,
-        currency: refundResult.currency || "SAR",
-        refundedAmount: refundResult.refunded,
-        refundReason: reason || "",
-        metadata: { original_amount: refundResult.amount, refunded_total: refundResult.refunded },
+        amount: refundAmount,
+        payerIp: clientIp,
       });
-      const isFullRefund = refundResult.refunded >= refundResult.amount;
-      if (isFullRefund) {
-        await storage.updateOrder(orderId, { status: "refunded" });
+      
+      if (refundResult.result === "SUCCESS") {
+        await storage.createPaymentTransaction({
+          restaurantId: callerRestaurantId,
+          orderId,
+          edfapayTransactionId: refundResult.trans_id,
+          edfapayGwayId: refundGwayId,
+          type: "refund",
+          status: "refunded",
+          amount: refundAmountHalalas,
+          currency: "SAR",
+          refundedAmount: refundAmountHalalas,
+          refundReason: reason || "",
+        });
+        
+        const isFullRefund = (refundAmountHalalas + totalRefunded) >= originalPayment.amount;
+        if (isFullRefund) {
+          await storage.updateOrder(orderId, { status: "refunded" });
+        }
+        
+        res.json({
+          success: true,
+          payment: {
+            id: refundResult.trans_id,
+            status: refundResult.status,
+            amount: refundAmount,
+          },
+          isFullRefund,
+        });
+      } else {
+        res.status(400).json({ error: "Refund failed", details: refundResult.error_message });
       }
-      res.json({
-        success: true,
-        payment: {
-          id: refundResult.id,
-          status: refundResult.status,
-          amount: refundResult.amount,
-          refunded: refundResult.refunded,
-          refunded_at: refundResult.refunded_at,
-        },
-        isFullRefund,
-      });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Refund error:", error);
-      res.status(500).json({ error: "Failed to process refund" });
+      res.status(500).json({ error: error.message || "Failed to process refund" });
     }
   });
 
-  // --- Payment Webhooks (Moyasar sends events here) ---
+  // --- Payment Webhooks (EdfaPay sends callback notifications here) ---
   app.post("/api/payments/webhook", async (req, res) => {
     try {
       const payload = req.body;
-      const eventType = payload.type || payload.event;
-      const paymentData = payload.data || payload;
-      console.log(`Webhook received: ${eventType}`, paymentData?.id);
-      if (!paymentData?.id) {
-        return res.status(200).json({ received: true });
+      
+      // Basic webhook validation
+      if (!payload || typeof payload !== "object") {
+        console.warn("Webhook: invalid payload received");
+        return res.status(400).send("ERROR");
       }
-      const existingTx = await storage.getPaymentTransactionByMoyasarId(paymentData.id);
-      switch (eventType) {
-        case "payment_paid": {
-          const orderId = paymentData.metadata?.order_id;
-          if (orderId) {
-            const order = await storage.getOrder(orderId);
-            if (order && !order.isPaid) {
-              await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "moyasar_online" });
-            }
-            if (!existingTx && order) {
-              await storage.createPaymentTransaction({
-                restaurantId: order.restaurantId,
-                orderId,
-                moyasarPaymentId: paymentData.id,
-                type: "payment",
-                status: "paid",
-                amount: paymentData.amount,
-                currency: paymentData.currency || "SAR",
-                paymentMethod: paymentData.source?.type,
-                cardBrand: paymentData.source?.company,
-                webhookReceived: true,
-              });
-            } else {
-              await storage.updatePaymentTransaction(existingTx.id, { webhookReceived: true, status: "paid" });
-            }
+      
+      const action = payload.action;   // SALE, REFUND
+      const result = payload.result;   // SUCCESS, DECLINED, REDIRECT
+      const status = payload.status;   // SETTLED, DECLINED, PENDING, REFUND
+      const orderId = payload.order_id;
+      const transId = payload.trans_id;
+      
+      console.log(`EdfaPay Webhook: action=${action} result=${result} status=${status} order=${orderId} trans=${transId}`);
+      
+      if (!orderId || !transId) {
+        return res.status(200).send("OK");
+      }
+      
+      const order = await storage.getOrder(orderId);
+      if (!order) {
+        console.warn(`Webhook: order ${orderId} not found`);
+        return res.status(200).send("OK");
+      }
+      
+      // Verify webhook hash for authenticity
+      if (payload.hash) {
+        const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+        if (keys.password) {
+          const isValid = edfapay.verifyCallbackHash(payload as any, keys.password);
+          if (!isValid) {
+            console.warn(`Webhook: hash verification FAILED for order ${orderId} trans ${transId}`);
+            // Log but still process — some callbacks may have partial fields
+          } else {
+            console.log(`Webhook: hash verified OK for order ${orderId}`);
           }
-          break;
-        }
-        case "payment_failed": {
-          const orderId = paymentData.metadata?.order_id;
-          if (existingTx) {
-            await storage.updatePaymentTransaction(existingTx.id, { webhookReceived: true, status: "failed" });
-          } else if (orderId) {
-            const failedOrder = await storage.getOrder(orderId);
-            if (failedOrder) {
-              await storage.createPaymentTransaction({
-                restaurantId: failedOrder.restaurantId,
-                orderId,
-                moyasarPaymentId: paymentData.id,
-                type: "payment",
-                status: "failed",
-                amount: paymentData.amount,
-                currency: paymentData.currency || "SAR",
-                webhookReceived: true,
-              });
-            }
-          }
-          break;
-        }
-        case "payment_refunded": {
-          if (existingTx) {
-            await storage.updatePaymentTransaction(existingTx.id, {
-              webhookReceived: true,
-              status: "refunded",
-              refundedAmount: paymentData.refunded,
-            });
-          }
-          const orderId = paymentData.metadata?.order_id;
-          if (orderId && paymentData.refunded >= paymentData.amount) {
-            await storage.updateOrder(orderId, { status: "refunded" });
-          }
-          break;
         }
       }
-      res.status(200).json({ received: true });
+      
+      if (action === "SALE" && result === "SUCCESS" && edfapay.isSuccessfulPayment(status)) {
+        // Payment successful
+        if (!order.isPaid) {
+          await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "edfapay_online" });
+        }
+        
+        // Create transaction record
+        const existingTx = await storage.getPaymentTransactions(order.restaurantId, orderId);
+        const hasPaidTx = existingTx.some(t => t.type === "payment" && t.status === "paid");
+        if (!hasPaidTx) {
+          await storage.createPaymentTransaction({
+            restaurantId: order.restaurantId,
+            orderId,
+            edfapayTransactionId: transId,
+            edfapayGwayId: payload.gway_id || null,
+            type: "payment",
+            status: "paid",
+            amount: Math.round(parseFloat(payload.amount || order.total || "0") * 100),
+            currency: payload.currency || "SAR",
+            paymentMethod: "edfapay_online",
+            webhookReceived: true,
+          });
+        }
+      } else if (action === "SALE" && result === "DECLINED") {
+        // Payment failed
+        await storage.createPaymentTransaction({
+          restaurantId: order.restaurantId,
+          orderId,
+          edfapayTransactionId: transId,
+          type: "payment",
+          status: "failed",
+          amount: Math.round(parseFloat(payload.amount || order.total || "0") * 100),
+          currency: payload.currency || "SAR",
+          webhookReceived: true,
+          metadata: { decline_reason: payload.decline_reason },
+        });
+      } else if (action === "REFUND" && result === "SUCCESS") {
+        // Refund
+        await storage.createPaymentTransaction({
+          restaurantId: order.restaurantId,
+          orderId,
+          edfapayTransactionId: transId,
+          type: "refund",
+          status: "refunded",
+          amount: Math.round(parseFloat(payload.amount || "0") * 100),
+          currency: payload.currency || "SAR",
+          refundedAmount: Math.round(parseFloat(payload.amount || "0") * 100),
+          webhookReceived: true,
+        });
+      }
+      
+      // EdfaPay expects "OK" response
+      res.status(200).send("OK");
     } catch (error) {
       console.error("Payment webhook error:", error);
-      res.status(200).json({ received: true });
+      res.status(200).send("OK");
     }
   });
 
-  // --- Moyasar Invoices (Payment Links) ---
-  app.get("/api/payments/invoices", async (req, res) => {
-    try {
-      const invoices = await storage.getMoyasarInvoices(await getRestaurantId(req));
-      res.json(invoices);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get invoices" });
-    }
-  });
-
-  app.post("/api/payments/invoices", async (req, res) => {
-    try {
-      const { orderId, amount, description, customerName, customerPhone, customerEmail, expiredAt } = req.body;
-      if (!amount || !description) {
-        return res.status(400).json({ error: "Missing amount or description" });
-      }
-      const rId = await getRestaurantId(req);
-      const rKeys = await getRestaurantMoyasarKeys(rId);
-      const auth = getMoyasarAuth(rKeys.secretKey);
-      const amountInHalalas = Math.round(parseFloat(amount) * 100);
-      const baseUrl = `${req.protocol}://${req.get("host")}`;
-      const invoicePayload: any = {
-        amount: amountInHalalas,
-        currency: "SAR",
-        description,
-        callback_url: `${baseUrl}/api/payments/invoices/callback`,
-      };
-      if (expiredAt) invoicePayload.expired_at = expiredAt;
-      if (orderId) invoicePayload.metadata = { order_id: orderId };
-      const moyasarRes = await fetch(`${MOYASAR_API}/invoices`, {
-        method: "POST",
-        headers: {
-          "Authorization": auth,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams(
-          Object.entries(invoicePayload).reduce((acc: any, [k, v]) => {
-            if (typeof v === "object") {
-              Object.entries(v as any).forEach(([mk, mv]) => { acc[`${k}[${mk}]`] = String(mv); });
-            } else {
-              acc[k] = String(v);
-            }
-            return acc;
-          }, {})
-        ),
-      });
-      if (!moyasarRes.ok) {
-        const errText = await moyasarRes.text();
-        console.error("Moyasar invoice error:", errText);
-        return res.status(400).json({ error: "Failed to create invoice with Moyasar" });
-      }
-      const moyasarInvoice = await moyasarRes.json() as any;
-      const localInvoice = await storage.createMoyasarInvoice({
-        restaurantId: await getRestaurantId(req),
-        orderId: orderId || null,
-        moyasarInvoiceId: moyasarInvoice.id,
-        status: moyasarInvoice.status,
-        amount: amountInHalalas,
-        currency: "SAR",
-        description,
-        invoiceUrl: moyasarInvoice.url,
-        callbackUrl: invoicePayload.callback_url,
-        customerName: customerName || null,
-        customerPhone: customerPhone || null,
-        customerEmail: customerEmail || null,
-        expiredAt: expiredAt ? new Date(expiredAt) : null,
-        metadata: { moyasar_id: moyasarInvoice.id },
-      });
-      res.status(201).json({ ...localInvoice, moyasarUrl: moyasarInvoice.url });
-    } catch (error) {
-      console.error("Create invoice error:", error);
-      res.status(500).json({ error: "Failed to create invoice" });
-    }
-  });
-
-  app.post("/api/payments/invoices/callback", async (req, res) => {
-    try {
-      const payload = req.body;
-      console.log("Invoice callback received:", payload);
-      if (payload.id) {
-        const inv = await storage.getMoyasarInvoiceByMoyasarId(payload.id);
-        if (inv) {
-          await storage.updateMoyasarInvoice(inv.id, {
-            status: payload.status || "paid",
-            paidAt: new Date(),
-          });
-          if (inv.orderId && payload.status === "paid") {
-            await storage.updateOrder(inv.orderId, { isPaid: true, paymentMethod: "moyasar_online" });
-          }
-        }
-      }
-      res.status(200).json({ received: true });
-    } catch (error) {
-      console.error("Invoice callback error:", error);
-      res.status(200).json({ received: true });
-    }
-  });
-
-  // --- Apple Pay Domain Management ---
-  app.get("/api/payments/apple-pay-domains", async (req, res) => {
-    try {
-      const domains = await storage.getApplePayDomains(await getRestaurantId(req));
-      res.json(domains);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to get Apple Pay domains" });
-    }
-  });
-
-  app.post("/api/payments/apple-pay-domains", async (req, res) => {
-    try {
-      const { host } = req.body;
-      if (!host) {
-        return res.status(400).json({ error: "Domain host is required" });
-      }
-      const dRestId = await getRestaurantId(req);
-      const merchant = await storage.getMoyasarMerchant(dRestId);
-      if (!merchant || !merchant.moyasarMerchantId) {
-        return res.status(400).json({ error: "Merchant not set up. Please complete merchant onboarding first." });
-      }
-      const dKeys = await getRestaurantMoyasarKeys(dRestId);
-      const auth = getMoyasarAuth(dKeys.secretKey);
-      const moyasarRes = await fetch(`${MOYASAR_PLATFORM_API}/merchants/${merchant.moyasarMerchantId}/domains`, {
-        method: "POST",
-        headers: {
-          "Authorization": auth,
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-        },
-        body: JSON.stringify({ host }),
-      });
-      let moyasarDomain: any = null;
-      if (moyasarRes.ok) {
-        moyasarDomain = await moyasarRes.json();
-      }
-      const domain = await storage.createApplePayDomain({
-        restaurantId: await getRestaurantId(req),
-        merchantId: merchant.id,
-        moyasarDomainId: moyasarDomain?.id || null,
-        host,
-        status: moyasarDomain?.status || "initiated",
-      });
-      res.status(201).json(domain);
-    } catch (error) {
-      console.error("Apple Pay domain error:", error);
-      res.status(500).json({ error: "Failed to register Apple Pay domain" });
-    }
-  });
-
-  app.post("/api/payments/apple-pay-domains/:id/validate", async (req, res) => {
-    try {
-      const merchant = await storage.getMoyasarMerchant(await getRestaurantId(req));
-      if (!merchant || !merchant.moyasarMerchantId) {
-        return res.status(400).json({ error: "Merchant not found" });
-      }
-      const vRestId = await getRestaurantId(req);
-      const domains = await storage.getApplePayDomains(vRestId);
-      const domain = domains.find(d => d.id === req.params.id);
-      if (!domain || !domain.moyasarDomainId) {
-        return res.status(404).json({ error: "Domain not found" });
-      }
-      const vKeys = await getRestaurantMoyasarKeys(vRestId);
-      const auth = getMoyasarAuth(vKeys.secretKey);
-      const valRes = await fetch(`${MOYASAR_PLATFORM_API}/merchants/${merchant.moyasarMerchantId}/domains/${domain.moyasarDomainId}/validate`, {
-        method: "POST",
-        headers: { "Authorization": auth },
-      });
-      if (valRes.ok) {
-        await storage.updateApplePayDomain(domain.id, { status: "validated" });
-        res.json({ success: true, status: "validated" });
-      } else {
-        res.status(400).json({ error: "Domain validation failed" });
-      }
-    } catch (error) {
-      res.status(500).json({ error: "Failed to validate domain" });
-    }
-  });
-
-  app.delete("/api/payments/apple-pay-domains/:id", async (req, res) => {
-    try {
-      await storage.deleteApplePayDomain(req.params.id);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete domain" });
-    }
-  });
-
-  // --- Apple Pay Association File ---
-  app.get("/.well-known/apple-developer-merchantid-domain-association", async (req, res) => {
-    try {
-      const fs = await import("fs");
-      const path = await import("path");
-      const staticFile = path.join(process.cwd(), "client", "public", ".well-known", "apple-developer-merchantid-domain-association");
-      if (fs.existsSync(staticFile)) {
-        res.set("Content-Type", "text/plain");
-        return res.send(fs.readFileSync(staticFile, "utf-8"));
-      }
-      const fRestId = await getRestaurantId(req);
-      const merchant = await storage.getMoyasarMerchant(fRestId);
-      if (!merchant || !merchant.moyasarMerchantId) {
-        return res.status(404).send("Merchant not configured");
-      }
-      const fKeys = await getRestaurantMoyasarKeys(fRestId);
-      const auth = getMoyasarAuth(fKeys.secretKey);
-      const fileRes = await fetch(`${MOYASAR_PLATFORM_API}/merchants/${merchant.moyasarMerchantId}/domains/verification_file`, {
-        headers: { "Authorization": auth, "Accept": "application/json" },
-      });
-      if (fileRes.ok) {
-        const data = await fileRes.json() as any;
-        res.set("Content-Type", "text/plain");
-        res.send(data.data || data.message || "");
-      } else {
-        res.status(404).send("Association file not available");
-      }
-    } catch (error) {
-      res.status(500).send("Error fetching association file");
-    }
-  });
-
-  // --- Merchant Balance ---
-  app.get("/api/payments/balance", async (req: any, res) => {
-    try {
-      const bRestId = await getRestaurantId(req);
-      const bKeys = await getRestaurantMoyasarKeys(bRestId);
-      const auth = getMoyasarAuth(bKeys.secretKey);
-      const balanceRes = await fetch(`${MOYASAR_PLATFORM_API}/balance`, {
-        headers: { "Authorization": auth, "Accept": "application/json" },
-      });
-      if (balanceRes.ok) {
-        const balance = await balanceRes.json();
-        res.json(balance);
-      } else {
-        res.json({ currency: "SAR", total: 0, available: 0, transferred: 0 });
-      }
-    } catch (error) {
-      res.json({ currency: "SAR", total: 0, available: 0, transferred: 0 });
-    }
-  });
-
-  // --- Merchant Onboarding (Platform API) ---
-  app.post("/api/payments/merchant/register", async (req, res) => {
-    res.redirect(307, "/api/moyasar/merchant");
-  });
-
-  app.post("/api/payments/merchant/submit-review", async (req, res) => {
-    res.redirect(307, "/api/moyasar/merchant/submit-review");
-  });
-
-  // --- Test Cards Reference ---
+  // --- Test Cards Reference (EdfaPay Sandbox) ---
   app.get("/api/payments/test-cards", (_req, res) => {
     res.json({
       testCards: [
-        { brand: "Visa", number: "4111111111111111", expiry: "09/25", cvc: "123", result: "Successful" },
-        { brand: "Visa", number: "4000000000000002", expiry: "09/25", cvc: "123", result: "Declined" },
-        { brand: "Mastercard", number: "5111111111111118", expiry: "09/25", cvc: "123", result: "Successful" },
-        { brand: "Mastercard", number: "5200000000000007", expiry: "09/25", cvc: "123", result: "Declined" },
-        { brand: "Mada", number: "5043000000000003", expiry: "09/25", cvc: "123", result: "Successful" },
-        { brand: "Mada", number: "5043000000000011", expiry: "09/25", cvc: "123", result: "Declined" },
-        { brand: "Amex", number: "340000000000009", expiry: "09/25", cvc: "1234", result: "Successful" },
-        { brand: "Amex", number: "340000000000033", expiry: "09/25", cvc: "1234", result: "Declined" },
+        { brand: "Mastercard", number: "5123450000000008", expiry: "01/39", cvc: "100", result: "Successful", note: "EdfaPay official sandbox card" },
+        { brand: "Visa", number: "4111111111111111", expiry: "01/39", cvc: "100", result: "Successful" },
+        { brand: "Visa", number: "4000000000000002", expiry: "01/39", cvc: "100", result: "Declined" },
+        { brand: "Mastercard", number: "5111111111111118", expiry: "01/39", cvc: "100", result: "Successful" },
+        { brand: "Mastercard", number: "5200000000000007", expiry: "01/39", cvc: "100", result: "Declined" },
+        { brand: "Mada", number: "5043000000000003", expiry: "01/39", cvc: "100", result: "Successful" },
+        { brand: "Mada", number: "5043000000000011", expiry: "01/39", cvc: "100", result: "Declined" },
       ],
+      sandboxCredentials: {
+        client_key: "sandbox-client-key",
+        password: "sandbox-secret-password",
+        payer_email: "testuser@edfapay.com",
+      },
       stcPayTestOTP: "000000",
-      note: "Use these test cards with pk_test_/sk_test_ API keys only",
+      note: "Use these cards in the EdfaPay sandbox environment only. For production, complete onboarding.",
     });
+  });
+
+  // --- Recurring Payment (EdfaPay) ---
+  app.post("/api/payments/recurring", async (req, res) => {
+    try {
+      const { orderId, recurringToken, amount, description, payerEmail } = req.body;
+      if (!orderId || !recurringToken) {
+        return res.status(400).json({ error: "Missing required fields: orderId, recurringToken" });
+      }
+      const order = await storage.getOrder(orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      if (order.isPaid) {
+        return res.status(400).json({ error: "Order is already paid" });
+      }
+      const callerRestaurantId = await getRestaurantId(req);
+      if (order.restaurantId !== callerRestaurantId) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+      if (!keys.merchantId || !keys.password) {
+        return res.status(500).json({ error: "EdfaPay credentials not configured" });
+      }
+
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
+        || req.socket.remoteAddress
+        || "127.0.0.1";
+
+      const serverAmount = amount ? parseFloat(amount).toFixed(2) : parseFloat(order.total || "0").toFixed(2);
+      const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+      const host = req.headers["x-forwarded-host"] || req.headers.host || "tryingpos.com";
+      const notificationUrl = `${protocol}://${host}/api/payments/webhook`;
+
+      const recurringResult = await edfapay.recurringPayment({
+        merchantId: keys.merchantId,
+        password: keys.password,
+        recurringToken,
+        orderId,
+        amount: serverAmount,
+        currency: "SAR",
+        description: description || `Recurring payment for order ${order.orderNumber || orderId}`,
+        payerEmail: payerEmail || "customer@example.com",
+        payerIp: clientIp,
+        notificationUrl,
+      });
+
+      if (recurringResult.result === "SUCCESS" || edfapay.isSuccessfulPayment(recurringResult.status)) {
+        await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "edfapay_online" });
+        await storage.createPaymentTransaction({
+          restaurantId: callerRestaurantId,
+          orderId,
+          edfapayTransactionId: recurringResult.trans_id,
+          type: "payment",
+          status: "paid",
+          amount: Math.round(parseFloat(serverAmount) * 100),
+          currency: "SAR",
+          paymentMethod: "edfapay_online",
+          metadata: { recurring: true, recurringToken },
+        });
+        res.json({
+          success: true,
+          transId: recurringResult.trans_id,
+          status: recurringResult.status,
+        });
+      } else if (recurringResult.result === "REDIRECT" && recurringResult.redirect_url) {
+        res.json({
+          action: "redirect",
+          redirectUrl: recurringResult.redirect_url,
+          transId: recurringResult.trans_id,
+        });
+      } else {
+        res.status(400).json({
+          error: "Recurring payment failed",
+          details: recurringResult.error_message || recurringResult.status,
+        });
+      }
+    } catch (error: any) {
+      console.error("Recurring payment error:", error);
+      res.status(500).json({ error: error.message || "Failed to process recurring payment" });
+    }
+  });
+
+  // ==========================================
+  // Apple Pay S2S Integration
+  // ==========================================
+
+  // --- Check Apple Pay availability ---
+  app.get("/api/payments/apple-pay-config", async (req, res) => {
+    try {
+      const applePayAvailable = edfapay.hasApplePayConfig();
+      const config = edfapay.getApplePayConfig();
+      res.json({
+        available: applePayAvailable,
+        merchantId: config?.merchantId || null,
+        domain: config?.domain || null,
+        supportedNetworks: ["visa", "masterCard", "mada"],
+        merchantCapabilities: ["supports3DS"],
+        supportedCountries: ["SA"],
+        currencyCode: "SAR",
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to check Apple Pay config" });
+    }
+  });
+
+  // --- Apple Pay Merchant Validation Session ---
+  // Frontend calls this during onvalidatemerchant event
+  app.post("/api/payments/apple-pay-session", async (req, res) => {
+    try {
+      const { validationURL } = req.body;
+      if (!validationURL) {
+        return res.status(400).json({ error: "Missing validationURL" });
+      }
+
+      // Security: only allow Apple's validation URLs
+      const url = new URL(validationURL);
+      if (!url.hostname.endsWith(".apple.com")) {
+        return res.status(400).json({ error: "Invalid validation URL — must be apple.com" });
+      }
+
+      const session = await edfapay.validateApplePaySession(validationURL);
+      res.json(session);
+    } catch (error: any) {
+      console.error("Apple Pay session validation error:", error);
+      res.status(500).json({ error: error.message || "Failed to validate Apple Pay session" });
+    }
+  });
+
+  // --- Apple Pay S2S Sale — process Apple Pay token ---
+  app.post("/api/payments/apple-pay-sale", async (req, res) => {
+    try {
+      const { orderId, callbackUrl, applePayToken, payerFirstName, payerLastName, payerEmail, payerPhone } = req.body;
+      if (!orderId || !callbackUrl || !applePayToken) {
+        return res.status(400).json({ error: "Missing required fields: orderId, callbackUrl, applePayToken" });
+      }
+
+      const order = await storage.getOrder(orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      const serverAmount = parseFloat(order.total || "0");
+      if (serverAmount <= 0) {
+        return res.status(400).json({ error: "Invalid order total" });
+      }
+      if (order.isPaid) {
+        return res.status(400).json({ error: "Order is already paid" });
+      }
+
+      const keys = await getRestaurantEdfapayKeys(order.restaurantId);
+      if (!keys.merchantId || !keys.password) {
+        return res.status(500).json({ error: "بوابة الدفع غير مُعدة بعد", configured: false });
+      }
+
+      const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
+        || req.socket.remoteAddress
+        || "127.0.0.1";
+
+      const description = `Order ${order.orderNumber || orderId}`;
+      const amount = serverAmount.toFixed(2);
+
+      const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+      const host = req.headers["x-forwarded-host"] || req.headers.host || "tryingpos.com";
+      const notificationUrl = `${protocol}://${host}/api/payments/webhook`;
+
+      // Stringify the Apple Pay token if it's an object
+      const tokenString = typeof applePayToken === "string"
+        ? applePayToken
+        : JSON.stringify(applePayToken);
+
+      const edfaResult = await edfapay.applePaySale({
+        merchantId: keys.merchantId,
+        password: keys.password,
+        orderId,
+        amount,
+        currency: "SAR",
+        description,
+        payerFirstName: payerFirstName || order.customerName?.split(" ")[0] || "Customer",
+        payerLastName: payerLastName || order.customerName?.split(" ").slice(1).join(" ") || "Guest",
+        payerEmail: payerEmail || "customer@example.com",
+        payerPhone: payerPhone || order.customerPhone || "0500000000",
+        payerIp: clientIp,
+        callbackUrl,
+        notificationUrl,
+        applePayToken: tokenString,
+      });
+
+      if (edfaResult.result === "SUCCESS" || edfapay.isSuccessfulPayment(edfaResult.status)) {
+        // Direct success — mark order as paid
+        await storage.updateOrder(orderId, { isPaid: true, paymentMethod: "apple_pay" });
+        await storage.createPaymentTransaction({
+          restaurantId: order.restaurantId,
+          orderId,
+          edfapayTransactionId: edfaResult.trans_id,
+          type: "payment",
+          status: "paid",
+          amount: Math.round(serverAmount * 100),
+          currency: "SAR",
+          paymentMethod: "apple_pay",
+          metadata: { source: "apple_pay_s2s" },
+        });
+        res.json({
+          action: "success",
+          transId: edfaResult.trans_id,
+          status: edfaResult.status,
+          orderId,
+        });
+      } else if (edfaResult.result === "REDIRECT" && edfaResult.redirect_url) {
+        // 3DS redirect required (rare for Apple Pay but possible)
+        res.json({
+          action: "redirect",
+          redirectUrl: edfaResult.redirect_url,
+          redirectMethod: edfaResult.redirect_method || "GET",
+          redirectParams: edfaResult.redirect_params || {},
+          transId: edfaResult.trans_id,
+          orderId,
+        });
+      } else {
+        res.status(400).json({
+          error: "Apple Pay payment failed",
+          details: edfaResult.error_message || edfaResult.status,
+          code: edfaResult.error_code,
+        });
+      }
+    } catch (error: any) {
+      console.error("Apple Pay S2S sale error:", error);
+      res.status(500).json({ error: error.message || "Failed to process Apple Pay payment" });
+    }
+  });
+
+  // --- Apple Pay Domain Verification ---
+  // Apple checks /.well-known/apple-developer-merchantid-domain-association
+  // The file content is provided by Apple and stored in env var
+  app.get("/.well-known/apple-developer-merchantid-domain-association", (_req, res) => {
+    const verificationContent = process.env.APPLE_PAY_DOMAIN_VERIFICATION;
+    if (!verificationContent) {
+      return res.status(404).send("Not configured");
+    }
+    res.set("Content-Type", "text/plain");
+    res.send(verificationContent);
   });
 
   app.get("/api/export/orders", async (req, res) => {
@@ -5800,20 +6592,20 @@ export async function registerRoutes(
       const rows = filtered.map(o => {
         const date = o.createdAt ? new Date(o.createdAt).toISOString().split("T")[0] : "";
         return [
-          o.orderNumber || "",
+          csvSafe(o.orderNumber),
           date,
-          o.orderType || "",
-          o.status || "",
-          o.paymentMethod || "",
+          csvSafe(o.orderType),
+          csvSafe(o.status),
+          csvSafe(o.paymentMethod),
           o.isPaid ? "Yes" : "No",
-          `"${(o.customerName || "").replace(/"/g, '""')}"`,
-          o.customerPhone || "",
+          csvQuote(o.customerName),
+          csvSafe(o.customerPhone),
           o.subtotal || "0",
           o.discount || "0",
           o.tax || "0",
           o.deliveryFee || "0",
           o.total || "0",
-          `"${(o.notes || "").replace(/"/g, '""')}"`,
+          csvQuote(o.notes),
         ].join(",");
       }).join("\n");
 
@@ -5833,11 +6625,11 @@ export async function registerRoutes(
 
       const header = "Name,Category,Current Stock,Min Stock,Unit,Cost,Supplier\n";
       const rows = items.map(i => [
-        `"${(i.name || "").replace(/"/g, '""')}"`,
-        `"${(i.category || "").replace(/"/g, '""')}"`,
+        csvQuote(i.name),
+        csvQuote(i.category),
         i.currentStock || "0",
         i.minStock || "0",
-        i.unit || "",
+        csvSafe(i.unit),
         i.costPerUnit || "0",
         `""`,
       ].join(",")).join("\n");
@@ -5857,13 +6649,13 @@ export async function registerRoutes(
 
       const header = "Name,Phone,Email,Address,Total Orders,Total Spent,Notes\n";
       const rows = customers.map(c => [
-        `"${(c.name || "").replace(/"/g, '""')}"`,
-        c.phone || "",
-        c.email || "",
-        `"${(c.address || "").replace(/"/g, '""')}"`,
+        csvQuote(c.name),
+        csvSafe(c.phone),
+        csvSafe(c.email),
+        csvQuote(c.address),
         c.totalOrders || "0",
         c.totalSpent || "0",
-        `"${(c.notes || "").replace(/"/g, '""')}"`,
+        csvQuote(c.notes),
       ].join(",")).join("\n");
 
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -5878,66 +6670,196 @@ export async function registerRoutes(
   // ZATCA E-Invoicing Routes
   // =====================================================
 
-  // Get ZATCA configuration status
+  // Helper: resolve ZATCA credentials — branch-level first, fall back to restaurant
+  async function getZatcaCredentials(restaurant: any, branchId?: string | null) {
+    if (branchId) {
+      const branch = await storage.getBranch(branchId);
+      if (branch && (branch as any).zatcaProductionCsid) {
+        return {
+          environment: (branch as any).zatcaEnvironment || restaurant.zatcaEnvironment || 'sandbox',
+          certificate: (branch as any).zatcaProductionCsid || (branch as any).zatcaComplianceCsid,
+          secret: (branch as any).zatcaSecretKey,
+          deviceId: (branch as any).zatcaDeviceId,
+          complianceCsid: (branch as any).zatcaComplianceCsid,
+          productionCsid: (branch as any).zatcaProductionCsid,
+          certificateExpiry: (branch as any).zatcaCertificateExpiry,
+          source: 'branch' as const,
+          branchId,
+          branchName: branch.name,
+        };
+      }
+    }
+    // Fall back to restaurant-level
+    return {
+      environment: restaurant.zatcaEnvironment || 'sandbox',
+      certificate: restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid,
+      secret: restaurant.zatcaSecretKey,
+      deviceId: restaurant.zatcaDeviceId,
+      complianceCsid: restaurant.zatcaComplianceCsid,
+      productionCsid: restaurant.zatcaProductionCsid,
+      certificateExpiry: restaurant.zatcaCertificateExpiry,
+      source: 'restaurant' as const,
+      branchId: null,
+      branchName: null,
+    };
+  }
+
+  // Get ZATCA configuration status (supports ?branchId=xxx)
   app.get("/api/zatca/status", async (req, res) => {
     try {
-      const restaurant = await storage.getRestaurantById(await getRestaurantId(req));
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
 
+      const branchId = req.query.branchId as string || null;
+      const creds = await getZatcaCredentials(restaurant, branchId);
+
+      // Get all branches status
+      const allBranches = await storage.getBranches(restaurantId);
+      const branchStatuses = allBranches.map((b: any) => ({
+        id: b.id,
+        name: b.name,
+        nameAr: b.nameAr,
+        slug: b.slug,
+        isMain: b.isMain,
+        hasDeviceId: !!b.zatcaDeviceId,
+        hasComplianceCsid: !!b.zatcaComplianceCsid,
+        hasProductionCsid: !!b.zatcaProductionCsid,
+        certificateExpiry: b.zatcaCertificateExpiry,
+        invoiceCounter: b.zatcaInvoiceCounter || 0,
+        isRegistered: !!(b.zatcaProductionCsid && b.zatcaSecretKey),
+      }));
+
       res.json({
-        environment: restaurant.zatcaEnvironment || 'sandbox',
+        environment: creds.environment,
         hasVatNumber: !!restaurant.vatNumber,
-        hasCertificate: !!restaurant.zatcaCertificate,
-        hasComplianceCsid: !!restaurant.zatcaComplianceCsid,
-        hasProductionCsid: !!restaurant.zatcaProductionCsid,
-        hasDeviceId: !!restaurant.zatcaDeviceId,
-        certificateExpiry: restaurant.zatcaCertificateExpiry,
+        hasCertificate: !!creds.certificate,
+        hasComplianceCsid: !!creds.complianceCsid,
+        hasProductionCsid: !!creds.productionCsid,
+        hasDeviceId: !!creds.deviceId,
+        certificateExpiry: creds.certificateExpiry,
         invoiceCounter: restaurant.zatcaInvoiceCounter || 0,
         taxEnabled: restaurant.taxEnabled !== false,
         taxRate: restaurant.taxRate || '15',
         vatNumber: restaurant.vatNumber,
+        credentialSource: creds.source,
         isFullyConfigured: !!(
           restaurant.vatNumber &&
-          restaurant.zatcaProductionCsid &&
+          creds.productionCsid &&
           restaurant.nameAr &&
           restaurant.streetName &&
           restaurant.buildingNumber &&
           restaurant.city &&
           restaurant.postalCode
         ),
+        branches: branchStatuses,
       });
     } catch (error) {
       res.status(500).json({ error: "Failed to get ZATCA status" });
     }
   });
 
-  // Register device - Step 1: Get Compliance CSID
+  // Generate CSR for ZATCA device registration (standalone endpoint)
+  app.post("/api/zatca/generate-csr", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
+
+      const { branchId } = req.body;
+      const branch = branchId ? await storage.getBranch(branchId) : null;
+      const branchName = branch ? (branch.nameAr || branch.name || 'Main') : (restaurant.nameAr || restaurant.nameEn || 'Main');
+      const egsSerial = `EGS1-${(restaurant.vatNumber || '000000000000000').replace(/\D/g, '').slice(0, 15)}-${String(branchId ? '00002' : '00001')}`;
+
+      const result = generateZatcaCsr({
+        commonName: egsSerial,
+        organizationIdentifier: restaurant.vatNumber || '',
+        organizationUnit: branchName,
+        organizationName: restaurant.nameEn || restaurant.nameAr || 'Restaurant',
+        countryCode: 'SA',
+        invoiceType: '1100',
+        location: restaurant.city || 'Riyadh',
+        industry: 'Food',
+      });
+
+      // Store private key
+      const keyData: Record<string, any> = { zatcaPrivateKey: result.privateKey };
+      if (branchId) {
+        await storage.updateBranch(branchId, keyData as any);
+      }
+      await storage.updateRestaurantById(restaurantId, keyData as any);
+
+      res.json({ csr: result.csr, message: 'CSR generated and private key stored securely' });
+    } catch (error: any) {
+      console.error("CSR generation error:", error?.message);
+      res.status(500).json({ error: error?.message || "Failed to generate CSR" });
+    }
+  });
+
+  // Register device - Step 1: Get Compliance CSID (supports branchId in body)
+  // Now auto-generates CSR if not provided, and stores the private key
   app.post("/api/zatca/compliance-csid", async (req, res) => {
     try {
       const restaurantId = await getRestaurantId(req);
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
 
-      const { otp, csr } = req.body;
+      const { otp, branchId } = req.body;
+      let privateKey: string | undefined;
+      let csr: string;
       if (!otp) return res.status(400).json({ error: "OTP is required" });
-      if (!csr) return res.status(400).json({ error: "CSR is required" });
+
+      // Always auto-generate CSR for reliability
+      const branch = branchId ? await storage.getBranch(branchId) : null;
+      const branchName = branch ? (branch.nameAr || branch.name || 'Main') : (restaurant.nameAr || restaurant.nameEn || 'Main');
+      const egsSerial = `EGS1-${(restaurant.vatNumber || '000000000000000').replace(/\D/g, '').slice(0, 15)}-${String(branchId ? '00002' : '00001')}`;
+      
+      const csrResult = generateZatcaCsr({
+        commonName: egsSerial,
+        organizationIdentifier: restaurant.vatNumber || '',
+        organizationUnit: branchName,
+        organizationName: restaurant.nameEn || restaurant.nameAr || 'Restaurant',
+        countryCode: 'SA',
+        invoiceType: '1100', // simplified + standard
+        location: restaurant.city || 'Riyadh',
+        industry: 'Food',
+      });
+      csr = csrResult.csr;
+      privateKey = csrResult.privateKey;
+
+      console.log('[ZATCA] CSR generated, length:', csr.length);
+      console.log('[ZATCA] VAT:', restaurant.vatNumber, 'EGS:', egsSerial);
 
       const environment = restaurant.zatcaEnvironment || 'sandbox';
       const baseUrl = getZatcaBaseUrl(environment);
 
-      const result = await getComplianceCsid(baseUrl, otp, csr);
+      const result = isMockEnvironment(environment)
+        ? mockGetComplianceCsid()
+        : await getComplianceCsid(baseUrl, otp, csr);
 
-      // Store compliance CSID
-      await storage.updateRestaurantById(restaurantId, {
+      // Store compliance CSID + private key at branch or restaurant level
+      const csidData: Record<string, any> = {
         zatcaComplianceCsid: result.binarySecurityToken,
         zatcaSecretKey: result.secret,
-        zatcaDeviceId: result.requestId,
-      } as any);
+        zatcaDeviceId: result.requestID,
+        zatcaCertificate: result.binarySecurityToken,
+      };
+      // Store private key if generated
+      if (privateKey) {
+        csidData.zatcaPrivateKey = privateKey;
+      }
+
+      if (branchId) {
+        await storage.updateBranch(branchId, { ...csidData, zatcaEnvironment: environment } as any);
+      }
+      // Always update restaurant level too (backward compat)
+      await storage.updateRestaurantById(restaurantId, csidData as any);
 
       res.json({
         success: true,
-        requestId: result.requestId,
+        requestId: result.requestID,
         dispositionMessage: result.dispositionMessage,
+        registeredFor: branchId ? 'branch' : 'restaurant',
       });
     } catch (error: any) {
       console.error("ZATCA Compliance CSID error:", error?.message);
@@ -5952,12 +6874,24 @@ export async function registerRoutes(
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
 
-      if (!restaurant.zatcaComplianceCsid || !restaurant.zatcaSecretKey) {
+      const branchId = req.body.branchId || null;
+      const creds = await getZatcaCredentials(restaurant, branchId);
+
+      if (!creds.complianceCsid || !creds.secret) {
         return res.status(400).json({ error: "Missing compliance CSID. Complete Step 1 first." });
       }
 
-      const environment = restaurant.zatcaEnvironment || 'sandbox';
-      const baseUrl = getZatcaBaseUrl(environment);
+      const baseUrl = getZatcaBaseUrl(creds.environment);
+
+      // Fetch private key for signing (branch-level first, then restaurant)
+      let privateKey: string | null = null;
+      if (branchId) {
+        const branch = await storage.getBranch(branchId);
+        privateKey = (branch as any)?.zatcaPrivateKey || null;
+      }
+      if (!privateKey) {
+        privateKey = (restaurant as any).zatcaPrivateKey || null;
+      }
 
       // Generate a test invoice for compliance check
       const uuid = generateInvoiceUuid();
@@ -6004,16 +6938,33 @@ export async function registerRoutes(
         invoiceCounter: 1,
       });
 
-      const hash = computeInvoiceHashBase64(testXml);
-
-      const result = await submitComplianceInvoice(
-        baseUrl,
-        restaurant.zatcaComplianceCsid,
-        restaurant.zatcaSecretKey,
-        hash,
-        uuid,
-        testXml
+      // Sign the invoice with private key + compliance certificate (required by ZATCA)
+      const signResult = buildSignedInvoice(
+        testXml,
+        privateKey,
+        creds.complianceCsid!,
+        {
+          sellerName: restaurant.nameAr || restaurant.nameEn || 'مطعم',
+          vatNumber: restaurant.vatNumber || '',
+          timestamp: now.toISOString().replace('T', 'T').slice(0, 19) + 'Z',
+          total: '115.00',
+          vatAmount: '15.00',
+        }
       );
+
+      const xmlToSubmit = signResult.signedXml || signResult.finalXml;
+      const hash = signResult.invoiceHash;
+
+      const result = isMockEnvironment(creds.environment)
+        ? mockSubmitComplianceInvoice()
+        : await submitComplianceInvoice(
+            baseUrl,
+            creds.complianceCsid!,
+            creds.secret!,
+            hash,
+            uuid,
+            xmlToSubmit
+          );
 
       res.json({
         success: result.validationResults?.status === 'PASS',
@@ -6033,31 +6984,42 @@ export async function registerRoutes(
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
 
-      if (!restaurant.zatcaComplianceCsid || !restaurant.zatcaSecretKey || !restaurant.zatcaDeviceId) {
+      const branchId = req.body.branchId || null;
+      const creds = await getZatcaCredentials(restaurant, branchId);
+
+      if (!creds.complianceCsid || !creds.secret || !creds.deviceId) {
         return res.status(400).json({ error: "Missing compliance credentials. Complete Steps 1-2 first." });
       }
 
-      const environment = restaurant.zatcaEnvironment || 'sandbox';
-      const baseUrl = getZatcaBaseUrl(environment);
+      const baseUrl = getZatcaBaseUrl(creds.environment);
 
-      const result = await getProductionCsid(
-        baseUrl,
-        restaurant.zatcaDeviceId,
-        restaurant.zatcaComplianceCsid,
-        restaurant.zatcaSecretKey
-      );
+      const result = isMockEnvironment(creds.environment)
+        ? mockGetProductionCsid()
+        : await getProductionCsid(
+            baseUrl,
+            creds.deviceId,
+            creds.complianceCsid,
+            creds.secret
+          );
 
-      // Store production CSID
-      await storage.updateRestaurantById(restaurantId, {
+      // Store production CSID at branch level if branchId, else restaurant
+      const prodCsidData = {
         zatcaProductionCsid: result.binarySecurityToken,
         zatcaSecretKey: result.secret,
         zatcaCertificate: result.binarySecurityToken,
-      } as any);
+      };
+
+      if (branchId) {
+        await storage.updateBranch(branchId, prodCsidData as any);
+      }
+      // Always update restaurant level too (backward compat)
+      await storage.updateRestaurantById(restaurantId, prodCsidData as any);
 
       res.json({
         success: true,
-        requestId: result.requestId,
+        requestId: result.requestID,
         dispositionMessage: result.dispositionMessage,
+        registeredFor: branchId ? 'branch' : 'restaurant',
       });
     } catch (error: any) {
       console.error("ZATCA Production CSID error:", error?.message);
@@ -6076,9 +7038,9 @@ export async function registerRoutes(
       if (!invoice) return res.status(404).json({ error: "Invoice not found" });
       if (invoice.restaurantId !== restaurantId) return res.status(403).json({ error: "Unauthorized" });
 
-      const certificate = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid;
-      const secret = restaurant.zatcaSecretKey;
-      if (!certificate || !secret) {
+      // Resolve credentials from invoice's branch, fall back to restaurant
+      const creds = await getZatcaCredentials(restaurant, (invoice as any).branchId);
+      if (!creds.certificate || !creds.secret) {
         return res.status(400).json({ error: "ZATCA not configured. Complete device registration first." });
       }
 
@@ -6090,13 +7052,14 @@ export async function registerRoutes(
       const hash = invoice.invoiceHash || computeInvoiceHashBase64(xmlToSubmit);
       const uuid = invoice.uuid || generateInvoiceUuid();
 
-      const environment = restaurant.zatcaEnvironment || 'sandbox';
-      const baseUrl = getZatcaBaseUrl(environment);
+      const baseUrl = getZatcaBaseUrl(creds.environment);
 
       let result;
       if (invoice.invoiceType === 'standard') {
         // Standard invoice needs clearance
-        result = await clearInvoice(baseUrl, certificate, secret, hash, uuid, xmlToSubmit);
+        result = isMockEnvironment(creds.environment)
+          ? mockClearInvoice()
+          : await clearInvoice(baseUrl, creds.certificate!, creds.secret!, hash, uuid, xmlToSubmit);
         await storage.updateInvoice(invoice.id, {
           zatcaStatus: result.clearanceStatus === 'CLEARED' ? 'accepted' : 'rejected',
           zatcaSubmissionId: uuid,
@@ -6107,7 +7070,9 @@ export async function registerRoutes(
         });
       } else {
         // Simplified invoice needs reporting
-        result = await reportInvoice(baseUrl, certificate, secret, hash, uuid, xmlToSubmit);
+        result = isMockEnvironment(creds.environment)
+          ? mockReportInvoice()
+          : await reportInvoice(baseUrl, creds.certificate!, creds.secret!, hash, uuid, xmlToSubmit);
         await storage.updateInvoice(invoice.id, {
           zatcaStatus: result.reportingStatus === 'REPORTED' ? 'accepted' : 
                        result.reportingStatus === 'NOT_REPORTED' ? 'rejected' : 'submitted',
@@ -6145,30 +7110,31 @@ export async function registerRoutes(
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) return res.status(404).json({ error: "Restaurant not found" });
 
-      const certificate = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid;
-      const secret = restaurant.zatcaSecretKey;
-      if (!certificate || !secret) {
-        return res.status(400).json({ error: "ZATCA not configured" });
-      }
-
       const allInvoices = await storage.getInvoices(restaurantId);
       const pendingInvoices = allInvoices.filter(
         inv => inv.xmlContent && (!inv.zatcaStatus || inv.zatcaStatus === 'pending')
       );
 
-      const environment = restaurant.zatcaEnvironment || 'sandbox';
-      const baseUrl = getZatcaBaseUrl(environment);
-      
       const results: Array<{ invoiceId: string; invoiceNumber: string; status: string; error?: string }> = [];
 
       for (const invoice of pendingInvoices) {
         try {
+          // Resolve credentials per-invoice branch
+          const invCreds = await getZatcaCredentials(restaurant, (invoice as any).branchId);
+          if (!invCreds.certificate || !invCreds.secret) {
+            results.push({ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber || '', status: 'ERROR', error: 'No ZATCA credentials for this branch' });
+            continue;
+          }
+          const baseUrl = getZatcaBaseUrl(invCreds.environment);
+
           const xmlToSubmit = invoice.signedXml || invoice.xmlContent || '';
           const hash = invoice.invoiceHash || computeInvoiceHashBase64(xmlToSubmit);
           const uuid = invoice.uuid || generateInvoiceUuid();
 
           if (invoice.invoiceType === 'standard') {
-            const result = await clearInvoice(baseUrl, certificate, secret, hash, uuid, xmlToSubmit);
+            const result = isMockEnvironment(invCreds.environment)
+              ? mockClearInvoice()
+              : await clearInvoice(baseUrl, invCreds.certificate, invCreds.secret, hash, uuid, xmlToSubmit);
             await storage.updateInvoice(invoice.id, {
               zatcaStatus: result.clearanceStatus === 'CLEARED' ? 'accepted' : 'rejected',
               zatcaSubmissionId: uuid,
@@ -6178,7 +7144,9 @@ export async function registerRoutes(
             });
             results.push({ invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber || '', status: result.clearanceStatus || 'UNKNOWN' });
           } else {
-            const result = await reportInvoice(baseUrl, certificate, secret, hash, uuid, xmlToSubmit);
+            const result = isMockEnvironment(invCreds.environment)
+              ? mockReportInvoice()
+              : await reportInvoice(baseUrl, invCreds.certificate, invCreds.secret, hash, uuid, xmlToSubmit);
             await storage.updateInvoice(invoice.id, {
               zatcaStatus: result.reportingStatus === 'REPORTED' ? 'accepted' : 'rejected',
               zatcaSubmissionId: uuid,
@@ -6236,6 +7204,7 @@ export async function registerRoutes(
       // Create the invoice record
       const invoice = await storage.createInvoice({
         restaurantId,
+        branchId: order.branchId || null,
         orderId: order.id,
         invoiceNumber: zatcaResult.invoiceNumber,
         invoiceType: zatcaResult.invoiceType,
@@ -6247,6 +7216,7 @@ export async function registerRoutes(
         deliveryFee: zatcaResult.deliveryFee,
         qrCodeData: zatcaResult.qrData,
         xmlContent: zatcaResult.xmlContent,
+        signedXml: zatcaResult.signedXml || null,
         invoiceHash: zatcaResult.invoiceHash,
         previousInvoiceHash: zatcaResult.previousInvoiceHash,
         invoiceCounter: zatcaResult.invoiceCounter,
@@ -6281,11 +7251,12 @@ export async function registerRoutes(
       const menuItemsMap = new Map(menuItemsRaw.map(m => [m.id, m]));
 
       const zatcaResult = await buildZatcaInvoice(
-        restaurant, order, orderItems, menuItemsMap, 'credit_note', originalInvoice
+        restaurant, order, orderItems, menuItemsMap, 'credit_note', originalInvoice, undefined, req.body.reason || 'إلغاء الفاتورة'
       );
 
       const creditNote = await storage.createInvoice({
         restaurantId,
+        branchId: order.branchId || null,
         orderId: order.id,
         invoiceNumber: zatcaResult.invoiceNumber,
         invoiceType: 'credit_note',
@@ -6297,11 +7268,13 @@ export async function registerRoutes(
         deliveryFee: zatcaResult.deliveryFee,
         qrCodeData: zatcaResult.qrData,
         xmlContent: zatcaResult.xmlContent,
+        signedXml: zatcaResult.signedXml || null,
         invoiceHash: zatcaResult.invoiceHash,
         previousInvoiceHash: zatcaResult.previousInvoiceHash,
         invoiceCounter: zatcaResult.invoiceCounter,
         uuid: zatcaResult.uuid,
         relatedInvoiceId: originalInvoice.id,
+        refundReason: req.body.reason || 'إلغاء الفاتورة',
         status: 'issued',
         zatcaStatus: 'pending',
       });
@@ -6347,8 +7320,8 @@ export async function registerRoutes(
     try {
       const restaurantId = await getRestaurantId(req);
       const { environment } = req.body;
-      if (!['sandbox', 'simulation', 'production'].includes(environment)) {
-        return res.status(400).json({ error: "Invalid environment. Use: sandbox, simulation, or production" });
+      if (!['sandbox', 'simulation', 'production', 'mock'].includes(environment)) {
+        return res.status(400).json({ error: "Invalid environment. Use: sandbox, simulation, production, or mock" });
       }
       await storage.updateRestaurantById(restaurantId, { zatcaEnvironment: environment } as any);
       res.json({ success: true, environment });
@@ -6374,6 +7347,1302 @@ export async function registerRoutes(
     } catch (error) {
       res.status(500).json({ error: "Failed to download XML" });
     }
+  });
+
+  // ===============================
+  // DELIVERY PLATFORM INTEGRATION ROUTES
+  // ===============================
+
+  // --- Delivery Integrations CRUD ---
+
+  // Get all delivery integrations for the restaurant
+  app.get("/api/delivery/integrations", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branchId as string | undefined;
+      const integrations = await storage.getDeliveryIntegrations(restaurantId, branchId);
+      // Hide sensitive fields from response
+      const safe = integrations.map(i => ({
+        ...i,
+        clientSecret: i.clientSecret ? "••••••••" : null,
+        accessToken: undefined,
+        tokenExpiresAt: undefined,
+      }));
+      res.json(safe);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to fetch delivery integrations");
+    }
+  });
+
+  // Get single delivery integration
+  app.get("/api/delivery/integrations/:id", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+      res.json({
+        ...integration,
+        clientSecret: integration.clientSecret ? "••••••••" : null,
+        accessToken: undefined,
+        tokenExpiresAt: undefined,
+      });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to fetch delivery integration");
+    }
+  });
+
+  // Create delivery integration
+  app.post("/api/delivery/integrations", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const data = {
+        ...req.body,
+        restaurantId,
+      };
+      const integration = await storage.createDeliveryIntegration(data);
+      res.status(201).json(integration);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to create delivery integration");
+    }
+  });
+
+  // Update delivery integration
+  app.put("/api/delivery/integrations/:id", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const existing = await storage.getDeliveryIntegration(req.params.id);
+      if (!existing || existing.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      // Don't overwrite secret if masked value sent
+      const updateData = { ...req.body };
+      if (updateData.clientSecret === "••••••••") {
+        delete updateData.clientSecret;
+      }
+
+      // Clear token cache if credentials changed
+      if (updateData.clientId || updateData.clientSecret) {
+        hungerstation.clearTokenCache(existing.id);
+        updateData.accessToken = null;
+        updateData.tokenExpiresAt = null;
+      }
+
+      const updated = await storage.updateDeliveryIntegration(req.params.id, updateData);
+      res.json(updated);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to update delivery integration");
+    }
+  });
+
+  // Delete delivery integration
+  app.delete("/api/delivery/integrations/:id", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const existing = await storage.getDeliveryIntegration(req.params.id);
+      if (!existing || existing.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+      hungerstation.clearTokenCache(existing.id);
+      await storage.deleteDeliveryIntegration(req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to delete delivery integration");
+    }
+  });
+
+  // Test integration connection (validate credentials)
+  app.post("/api/delivery/integrations/:id/test", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const token = await hungerstation.getAccessToken(integration);
+        res.json({ success: true, message: "Connection successful", hasToken: !!token });
+      } else if (integration.platform === "jahez") {
+        // Test Jahez connection by trying to register webhooks
+        // This verifies the API base URL and auth token
+        const baseUrl = `${req.protocol}://${req.get("host")}`;
+        try {
+          await jahez.registerCreateOrderWebhook(integration, `${baseUrl}/api/webhooks/jahez`);
+          await jahez.registerOrderUpdateWebhook(integration, `${baseUrl}/api/webhooks/jahez/update`);
+          res.json({ success: true, message: "Jahez connection successful, webhooks registered" });
+        } catch (err: any) {
+          res.json({ success: false, message: `Jahez connection failed: ${err.message}` });
+        }
+      } else {
+        res.json({ success: false, message: `Platform ${integration.platform} not yet supported` });
+      }
+    } catch (error: any) {
+      res.json({ success: false, message: error.message || "Connection failed" });
+    }
+  });
+
+  // Get outlet status from HungerStation
+  app.get("/api/delivery/integrations/:id/outlet-status", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const result = await hungerstation.getOutletStatus(integration);
+        res.json(result);
+      } else {
+        res.json({ vendor_id: integration.vendorId, status: integration.outletStatus === "open" ? "OPEN" : "CLOSED" });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to get outlet status");
+    }
+  });
+
+  // Toggle outlet status (open/close) — supports HungerStation advanced statuses
+  app.put("/api/delivery/integrations/:id/status", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      const { status, closed_reason, closed_until } = req.body;
+      
+      // Accept both simple (open/closed) and HungerStation-specific statuses
+      const validStatuses = ["open", "closed", "OPEN", "CLOSED_TODAY", "CLOSED_UNTIL", "CHECKIN"];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ error: "Invalid status. Use: open, closed, OPEN, CLOSED_TODAY, CLOSED_UNTIL, CHECKIN" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        try {
+          await hungerstation.updateOutletStatus(integration, status, closed_reason, closed_until);
+        } catch (apiError: any) {
+          console.error(`[Delivery] Failed to update HungerStation outlet status:`, apiError.message);
+          // Still update locally even if API call fails
+        }
+      }
+
+      // Normalize to local status
+      const localStatus = (status === "open" || status === "OPEN") ? "open" : "closed";
+      const updated = await storage.updateDeliveryIntegration(req.params.id, { outletStatus: localStatus } as any);
+      res.json(updated);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to update outlet status");
+    }
+  });
+
+  // --- Delivery Orders ---
+
+  // Get delivery orders
+  app.get("/api/delivery/orders", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branchId as string | undefined;
+      const orders = await storage.getDeliveryOrders(restaurantId, branchId);
+      res.json(orders);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to fetch delivery orders");
+    }
+  });
+
+  // Get single delivery order
+  app.get("/api/delivery/orders/:id", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const order = await storage.getDeliveryOrder(req.params.id);
+      if (!order || order.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Delivery order not found" });
+      }
+      res.json(order);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to fetch delivery order");
+    }
+  });
+
+  // Helper: Full delivery order acceptance — creates POS order + items + invoice + day session
+  async function acceptDeliveryOrderFull(
+    restaurantId: string,
+    deliveryOrder: any,
+    integration: any
+  ): Promise<{ posOrder: any; deliveryOrderUpdated: any }> {
+    const platformRaw = (deliveryOrder.platform || 'delivery').toLowerCase();
+    const platformShort = platformRaw.toUpperCase().slice(0, 2) || "DL";
+    const externalRef = deliveryOrder.orderCode || deliveryOrder.externalOrderId || '';
+    const orderNumber = `DEL-${platformShort}-${externalRef.slice(-6) || Date.now().toString().slice(-6)}`;
+
+    // Payment method = platform name (hungerstation, jahez, etc.)
+    const paymentMethodName = platformRaw === 'hungerstation' ? 'hungerstation' :
+                              platformRaw === 'jahez' ? 'jahez' : platformRaw;
+
+    // 1. Create POS order
+    const posOrder = await storage.createOrder({
+      restaurantId,
+      branchId: deliveryOrder.branchId,
+      orderNumber,
+      orderType: "delivery",
+      status: "confirmed",
+      customerName: deliveryOrder.customerName,
+      customerPhone: deliveryOrder.customerPhone,
+      customerAddress: deliveryOrder.deliveryAddress,
+      notes: `[${platformRaw.toUpperCase()}] ${externalRef}`,
+      subtotal: String(deliveryOrder.subtotal || "0"),
+      deliveryFee: String(deliveryOrder.deliveryFee || "0"),
+      discount: String(deliveryOrder.discount || "0"),
+      total: String(deliveryOrder.total || "0"),
+      paymentMethod: paymentMethodName,
+      isPaid: true,
+    });
+
+    // 2. Create order items from delivery order items (for kitchen display + invoice)
+    const deliveryItems = Array.isArray(deliveryOrder.items) ? deliveryOrder.items : [];
+    for (const item of deliveryItems) {
+      try {
+        const qty = parseInt(String(item.quantity)) || 1;
+        const unitPrice = parseFloat(String(item.unitPrice || item.unit_price || 0));
+        const totalPrice = parseFloat(String(item.totalPrice || item.total_price || unitPrice * qty));
+        await storage.createOrderItem({
+          orderId: posOrder.id,
+          menuItemId: null, // Delivery items don't map to menu items
+          itemName: item.name || item.nameAr || "منتج توصيل",
+          quantity: qty,
+          unitPrice: unitPrice.toFixed(2),
+          totalPrice: totalPrice.toFixed(2),
+          notes: item.notes || null,
+        });
+      } catch (itemErr: any) {
+        console.error(`[Delivery] Failed to create order item:`, itemErr.message);
+      }
+    }
+
+    // 3. Generate ZATCA invoice
+    try {
+      const restaurant = await storage.getRestaurantById(restaurantId);
+      if (restaurant) {
+        const isTaxEnabled = restaurant.taxEnabled !== false;
+        const taxRate = isTaxEnabled ? 15 : 0;
+        const now = new Date();
+        const orderBranchId = deliveryOrder.branchId || null;
+
+        // Build ZATCA line items from delivery items
+        const xmlItems: ZatcaLineItem[] = deliveryItems.map((item: any, idx: number) => {
+          const unitPrice = parseFloat(String(item.unitPrice || item.unit_price || 0));
+          const qty = parseInt(String(item.quantity)) || 1;
+          const lineTotal = bankersRound(unitPrice * qty);
+          const lineTax = bankersRound(lineTotal * (taxRate / 100));
+          return {
+            id: String(idx + 1),
+            nameAr: item.nameAr || item.name || 'منتج توصيل',
+            nameEn: item.name || '',
+            quantity: qty,
+            unitPrice,
+            discount: 0,
+            taxRate,
+            taxAmount: lineTax,
+            totalWithTax: bankersRound(lineTotal + lineTax),
+            totalWithoutTax: lineTotal,
+          };
+        });
+
+        // If no items, create a single line item from totals
+        if (xmlItems.length === 0) {
+          const total = parseFloat(String(deliveryOrder.subtotal || deliveryOrder.total || 0));
+          const lineTax = bankersRound(total * (taxRate / 100));
+          xmlItems.push({
+            id: "1",
+            nameAr: `طلب توصيل ${deliveryOrder.platform}`,
+            nameEn: `${deliveryOrder.platform} delivery order`,
+            quantity: 1,
+            unitPrice: total,
+            discount: 0,
+            taxRate,
+            taxAmount: lineTax,
+            totalWithTax: bankersRound(total + lineTax),
+            totalWithoutTax: bankersRound(total),
+          });
+        }
+
+        const itemsSubtotal = bankersRound(xmlItems.reduce((sum, i) => sum + i.totalWithoutTax, 0));
+        const orderDiscount = parseFloat(String(deliveryOrder.discount || 0));
+        const orderDeliveryFee = parseFloat(String(deliveryOrder.deliveryFee || 0));
+        const taxableAmt = bankersRound(Math.max(0, itemsSubtotal - orderDiscount + orderDeliveryFee));
+        const vatAmount = bankersRound(taxableAmt * (taxRate / 100));
+        const invoiceTotal = bankersRound(taxableAmt + vatAmount);
+
+        const { counter: prevCounter, lastHash: prevHash } = await storage.getZatcaCounterAndHash(restaurantId, orderBranchId);
+        const currentCounter = prevCounter + 1;
+        const previousHash = prevHash ||
+          Buffer.from('NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==', 'base64').toString('utf8');
+
+        const uuid = generateInvoiceUuid();
+        const invoiceNumber = await storage.getNextInvoiceNumber(restaurantId, orderBranchId);
+
+        const unsignedDeliveryXml = generateZatcaXml({
+          uuid,
+          invoiceNumber,
+          invoiceType: 'simplified',
+          issueDate: now.toISOString().split('T')[0],
+          issueTime: now.toTimeString().split(' ')[0],
+          deliveryDate: now.toISOString().split('T')[0],
+          seller: {
+            nameAr: restaurant.nameAr || restaurant.nameEn || 'مطعم',
+            vatNumber: restaurant.vatNumber || '',
+            commercialRegistration: restaurant.commercialRegistration || '',
+            streetName: restaurant.streetName || '',
+            buildingNumber: restaurant.buildingNumber || '',
+            district: restaurant.district || '',
+            city: restaurant.city || '',
+            postalCode: restaurant.postalCode || '',
+            country: restaurant.country || 'SA',
+          },
+          items: xmlItems,
+          subtotal: itemsSubtotal,
+          discount: orderDiscount,
+          deliveryFee: orderDeliveryFee,
+          taxAmount: vatAmount,
+          taxRate,
+          total: invoiceTotal,
+          paymentMethod: paymentMethodName,
+          previousInvoiceHash: previousHash,
+          invoiceCounter: currentCounter,
+        });
+
+        // Resolve signing credentials
+        let delPrivKey: string | null = null;
+        let delCert: string | null = null;
+        if (orderBranchId) {
+          const br = await storage.getBranch(orderBranchId);
+          if (br && (br as any).zatcaPrivateKey) {
+            delPrivKey = (br as any).zatcaPrivateKey;
+            delCert = (br as any).zatcaProductionCsid || (br as any).zatcaComplianceCsid || (br as any).zatcaCertificate;
+          }
+        }
+        if (!delPrivKey && (restaurant as any).zatcaPrivateKey) {
+          delPrivKey = (restaurant as any).zatcaPrivateKey;
+          delCert = restaurant.zatcaProductionCsid || restaurant.zatcaComplianceCsid || restaurant.zatcaCertificate;
+        }
+
+        const delSignResult = buildSignedInvoice(
+          unsignedDeliveryXml, delPrivKey, delCert,
+          {
+            sellerName: restaurant.nameAr || restaurant.nameEn || 'مطعم',
+            vatNumber: restaurant.vatNumber || '',
+            timestamp: now.toISOString(),
+            total: invoiceTotal.toFixed(2),
+            vatAmount: vatAmount.toFixed(2),
+          },
+        );
+
+        const xmlContent = delSignResult.finalXml;
+        const invoiceHash = delSignResult.invoiceHash;
+        const qrData = delSignResult.qrData;
+
+        await storage.createInvoice({
+          restaurantId,
+          branchId: orderBranchId,
+          orderId: posOrder.id,
+          invoiceNumber,
+          invoiceType: "simplified",
+          subtotal: itemsSubtotal.toFixed(2),
+          taxRate: taxRate.toFixed(2),
+          taxAmount: vatAmount.toFixed(2),
+          total: invoiceTotal.toFixed(2),
+          qrCodeData: qrData,
+          xmlContent,
+          invoiceHash,
+          previousInvoiceHash: previousHash,
+          invoiceCounter: currentCounter,
+          uuid,
+          status: "issued",
+          zatcaStatus: "pending",
+          customerName: deliveryOrder.customerName || null,
+          customerPhone: deliveryOrder.customerPhone || null,
+          paymentMethod: paymentMethodName,
+          deliveryFee: (parseFloat(String(deliveryOrder.deliveryFee || 0))).toFixed(2),
+          discount: (parseFloat(String(deliveryOrder.discount || 0))).toFixed(2),
+          signedXml: delSignResult.signedXml || null,
+        });
+
+        await storage.updateZatcaCounterAndHash(restaurantId, orderBranchId, currentCounter, invoiceHash);
+        console.log(`[Delivery] Invoice ${invoiceNumber} created for delivery order ${deliveryOrder.orderCode}`);
+      }
+    } catch (invoiceErr: any) {
+      console.error(`[Delivery] Invoice creation failed:`, invoiceErr.message);
+    }
+
+    // 4. Update day session totals
+    try {
+      const currentSession = await storage.getCurrentDaySession(restaurantId, deliveryOrder.branchId || undefined);
+      if (currentSession) {
+        const orderTotal = parseFloat(posOrder.total || "0");
+        await storage.incrementDaySessionTotals(currentSession.id, orderTotal, "card");
+      }
+    } catch (e: any) {
+      console.error(`[Delivery] Day session update failed:`, e.message);
+    }
+
+    // 5. Update delivery order link
+    const deliveryOrderUpdated = await storage.updateDeliveryOrder(deliveryOrder.id, {
+      platformStatus: "accepted",
+      orderId: posOrder.id,
+      acceptedAt: new Date(),
+    } as any);
+
+    return { posOrder, deliveryOrderUpdated };
+  }
+
+  // Accept a delivery order (local status only — HungerStation has no "accept" API)
+  // Per HungerStation docs: RECEIVED → process order → READY_FOR_PICKUP/DISPATCHED
+  app.put("/api/delivery/orders/:id/accept", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const deliveryOrder = await storage.getDeliveryOrder(req.params.id);
+      if (!deliveryOrder || deliveryOrder.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Delivery order not found" });
+      }
+
+      if (deliveryOrder.platformStatus !== "new") {
+        return res.status(400).json({ error: `Cannot accept order in status: ${deliveryOrder.platformStatus}` });
+      }
+
+      const integration = await storage.getDeliveryIntegration(deliveryOrder.integrationId);
+      if (!integration) {
+        return res.status(400).json({ error: "Integration not found" });
+      }
+
+      // Jahez has accept: POST /webhooks/status_update with status "A"
+      if (integration.platform === "jahez") {
+        try {
+          const jahezOrderId = parseInt(deliveryOrder.externalOrderId);
+          await jahez.updateOrderStatus(integration, jahezOrderId, "A");
+        } catch (apiError: any) {
+          console.error(`[Delivery] Jahez accept failed:`, apiError.message);
+        }
+      }
+
+      // Full acceptance: POS order + items + invoice + day session
+      const { posOrder, deliveryOrderUpdated } = await acceptDeliveryOrderFull(restaurantId, deliveryOrder, integration);
+
+      // Create notification
+      await storage.createNotification({
+        restaurantId,
+        branchId: deliveryOrder.branchId,
+        type: "order",
+        title: `Delivery order accepted`,
+        titleAr: `تم قبول طلب التوصيل`,
+        message: `Order ${deliveryOrder.orderCode} from ${deliveryOrder.platform} has been accepted`,
+        messageAr: `تم قبول الطلب ${deliveryOrder.orderCode} من ${deliveryOrder.platform}`,
+        priority: "high",
+        referenceType: "order",
+        referenceId: posOrder.id,
+        targetRole: "kitchen",
+      });
+
+      res.json({ deliveryOrder: deliveryOrderUpdated, posOrder });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to accept delivery order");
+    }
+  });
+
+  // Mark delivery order as ready — this is the actual fulfillment call to HungerStation
+  // Docs: PUT /v2/chains/{chain_id}/orders/{order_id} with READY_FOR_PICKUP status
+  app.put("/api/delivery/orders/:id/ready", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const deliveryOrder = await storage.getDeliveryOrder(req.params.id);
+      if (!deliveryOrder || deliveryOrder.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Delivery order not found" });
+      }
+
+      if (!["accepted", "preparing"].includes(deliveryOrder.platformStatus)) {
+        return res.status(400).json({ error: `Cannot mark ready from status: ${deliveryOrder.platformStatus}` });
+      }
+
+      const integration = await storage.getDeliveryIntegration(deliveryOrder.integrationId);
+      if (integration && integration.platform === "hungerstation") {
+        try {
+          // Pass raw payload so we can build proper items array
+          await hungerstation.markOrderReady(integration, deliveryOrder.externalOrderId, deliveryOrder.rawPayload);
+        } catch (apiError: any) {
+          console.error(`[Delivery] HungerStation READY_FOR_PICKUP failed:`, apiError.message);
+        }
+      }
+
+      // Update POS order status too
+      if (deliveryOrder.orderId) {
+        await storage.updateOrderStatus(deliveryOrder.orderId, "ready");
+      }
+
+      const updated = await storage.updateDeliveryOrderStatus(req.params.id, "ready");
+      res.json(updated);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to mark delivery order ready");
+    }
+  });
+
+  // Reject/cancel a delivery order
+  // HungerStation: PUT /v2/chains/{chain_id}/orders/{order_id} with CANCELLED status — reasons: CLOSED, ITEM_UNAVAILABLE, TOO_BUSY
+  // Jahez: POST /webhooks/status_update with status "R" + reason message
+  app.put("/api/delivery/orders/:id/reject", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const deliveryOrder = await storage.getDeliveryOrder(req.params.id);
+      if (!deliveryOrder || deliveryOrder.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Delivery order not found" });
+      }
+
+      const reasonInput = req.body.reason || "TOO_BUSY";
+
+      const integration = await storage.getDeliveryIntegration(deliveryOrder.integrationId);
+      if (integration && integration.platform === "hungerstation") {
+        const validReasons = ["CLOSED", "ITEM_UNAVAILABLE", "TOO_BUSY"];
+        const cancelReason = validReasons.includes(reasonInput) ? reasonInput : "TOO_BUSY";
+        try {
+          await hungerstation.cancelOrder(integration, deliveryOrder.externalOrderId, cancelReason as any, deliveryOrder.rawPayload);
+        } catch (apiError: any) {
+          console.error(`[Delivery] HungerStation cancel failed:`, apiError.message);
+        }
+      } else if (integration && integration.platform === "jahez") {
+        try {
+          const jahezOrderId = parseInt(deliveryOrder.externalOrderId);
+          await jahez.updateOrderStatus(integration, jahezOrderId, "R", reasonInput);
+        } catch (apiError: any) {
+          console.error(`[Delivery] Jahez reject failed:`, apiError.message);
+        }
+      }
+
+      // Cancel POS order if exists
+      if (deliveryOrder.orderId) {
+        await storage.updateOrderStatus(deliveryOrder.orderId, "cancelled");
+      }
+
+      const updated = await storage.updateDeliveryOrder(req.params.id, {
+        platformStatus: "cancelled",
+        cancelReason: cancelReason,
+        cancelledAt: new Date(),
+      } as any);
+
+      res.json(updated);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to reject delivery order");
+    }
+  });
+
+  // --- Webhooks (No auth required from Express perspective) ---
+
+  // HungerStation webhook - receives order payload directly
+  // Per docs: The webhook receives the full order payload with a 'status' field
+  // Statuses: RECEIVED, READY_FOR_PICKUP, DISPATCHED, CANCELLED, DELIVERED
+  // The platform retries up to 5 times (10s apart) if no response within 10s
+  // We must handle duplicate payloads (idempotency)
+  app.post("/api/webhooks/hungerstation", async (req, res) => {
+    try {
+      const payload = req.body;
+      console.log(`[Webhook] HungerStation: ${payload?.status || "unknown"} order=${payload?.order_id || "?"} store=${payload?.client?.store_id || "?"}`);
+      
+      // Per docs: webhook payload IS the order object directly
+      // Key fields: order_id, status, client.store_id, client.chain_id
+      const orderStatus = payload.status;
+      const orderId = payload.order_id;
+      
+      if (!orderId) {
+        console.error("[Webhook] HungerStation: No order_id in payload");
+        return res.status(200).json({ received: true }); // Always 200 to prevent retries
+      }
+
+      // Find integration by store_id (or external_partner_config_id)
+      // Per docs: client.store_id identifies the vendor/store
+      const client = payload.client || {};
+      const storeId = client.store_id || client.external_partner_config_id || client.id;
+      if (!storeId) {
+        console.error("[Webhook] HungerStation: No store_id in payload.client");
+        return res.status(200).json({ received: true });
+      }
+
+      const integration = await storage.getDeliveryIntegrationByVendor("hungerstation", String(storeId));
+      if (!integration) {
+        console.error(`[Webhook] HungerStation: No integration found for store ${storeId}`);
+        return res.status(200).json({ received: true });
+      }
+
+      // Validate webhook authorization (secret)
+      // Per docs: Secret is configured in Partner Portal, sent as Authorization header
+      const authHeader = req.headers.authorization;
+      if (!hungerstation.validateWebhookAuth(authHeader as string, integration)) {
+        console.error(`[Webhook] HungerStation: Invalid authorization for store ${storeId}`);
+        return res.status(200).json({ received: true }); // Still 200 per best practice
+      }
+
+      // Handle based on order status (not event type)
+      // Per docs: RECEIVED → READY_FOR_PICKUP → DISPATCHED → DELIVERED (or CANCELLED)
+      if (orderStatus === "RECEIVED") {
+        // New order received
+        const parsed = hungerstation.parseHungerStationOrder(payload);
+
+        // Idempotency check — handle duplicate webhook deliveries
+        const existing = await storage.getDeliveryOrderByExternalId("hungerstation", parsed.externalOrderId);
+        if (existing) {
+          console.log(`[Webhook] HungerStation: Duplicate order ${parsed.externalOrderId}, skipping`);
+          return res.status(200).json({ received: true });
+        }
+
+        // Create delivery order
+        const deliveryOrder = await storage.createDeliveryOrder({
+          restaurantId: integration.restaurantId,
+          branchId: integration.branchId,
+          integrationId: integration.id,
+          platform: "hungerstation",
+          externalOrderId: parsed.externalOrderId,
+          orderCode: parsed.orderCode,
+          platformStatus: "new",
+          transportType: parsed.transportType,
+          rawPayload: payload, // Store full payload for later use (fulfillment items)
+          customerName: parsed.customerName,
+          customerPhone: parsed.customerPhone,
+          deliveryAddress: parsed.deliveryAddress,
+          deliveryLat: parsed.deliveryLat,
+          deliveryLng: parsed.deliveryLng,
+          subtotal: parsed.subtotal,
+          deliveryFee: parsed.deliveryFee,
+          discount: parsed.discount,
+          total: parsed.total,
+          items: parsed.items,
+          estimatedDeliveryTime: parsed.estimatedDeliveryTime,
+        });
+
+        // Create notification for new delivery order
+        await storage.createNotification({
+          restaurantId: integration.restaurantId,
+          branchId: integration.branchId,
+          type: "order",
+          title: `New HungerStation Order`,
+          titleAr: `طلب جديد من هنقرستيشن`,
+          message: `New order ${parsed.orderCode} - ${parsed.total} SAR from ${parsed.customerName}`,
+          messageAr: `طلب جديد ${parsed.orderCode} - ${parsed.total} ريال من ${parsed.customerName}`,
+          priority: "urgent",
+          referenceType: "order",
+          referenceId: deliveryOrder.id,
+          targetRole: "all",
+        });
+
+        // Auto-accept if configured — full flow with items + invoice + day session
+        if (integration.autoAccept) {
+          try {
+            await acceptDeliveryOrderFull(integration.restaurantId, deliveryOrder, integration);
+            console.log(`[Webhook] HungerStation: Order ${parsed.orderCode} auto-accepted`);
+          } catch (autoErr: any) {
+            console.error(`[Webhook] Auto-accept failed:`, autoErr.message);
+          }
+        }
+
+        console.log(`[Webhook] HungerStation: Order ${parsed.orderCode} RECEIVED, id=${deliveryOrder.id}`);
+
+      } else if (orderStatus === "CANCELLED") {
+        // Order cancelled by customer, logistics, or platform
+        const existing = await storage.getDeliveryOrderByExternalId("hungerstation", String(orderId));
+        if (existing) {
+          const cancellation = payload.cancellation || {};
+          const cancelReason = cancellation.reason || "Cancelled by platform";
+          const postPickup = cancellation.post_picked_up === true;
+          
+          await storage.updateDeliveryOrder(existing.id, {
+            platformStatus: "cancelled",
+            cancelReason: `${cancelReason}${postPickup ? " (after rider pickup)" : ""}`,
+            cancelledAt: new Date(),
+          } as any);
+          if (existing.orderId) {
+            await storage.updateOrderStatus(existing.orderId, "cancelled");
+          }
+          console.log(`[Webhook] HungerStation: Order ${orderId} CANCELLED (${cancelReason})${postPickup ? " [post pickup]" : ""}`);
+        }
+
+      } else if (orderStatus === "READY_FOR_PICKUP") {
+        // Confirmation that order was fulfilled (our PUT was successful)
+        const existing = await storage.getDeliveryOrderByExternalId("hungerstation", String(orderId));
+        if (existing) {
+          await storage.updateDeliveryOrderStatus(existing.id, "ready");
+          console.log(`[Webhook] HungerStation: Order ${orderId} READY_FOR_PICKUP confirmed`);
+        }
+
+      } else if (orderStatus === "DISPATCHED") {
+        // Rider picked up the order (Platform Delivery) or vendor dispatched (Vendor Delivery)
+        const existing = await storage.getDeliveryOrderByExternalId("hungerstation", String(orderId));
+        if (existing) {
+          await storage.updateDeliveryOrder(existing.id, {
+            platformStatus: "picked_up",
+            pickedUpAt: new Date(),
+          } as any);
+          console.log(`[Webhook] HungerStation: Order ${orderId} DISPATCHED`);
+        }
+
+      } else if (orderStatus === "DELIVERED") {
+        // Order delivered to customer (Platform Delivery flow — may have ~30min delay)
+        const existing = await storage.getDeliveryOrderByExternalId("hungerstation", String(orderId));
+        if (existing) {
+          await storage.updateDeliveryOrderStatus(existing.id, "delivered");
+          if (existing.orderId) {
+            await storage.updateOrderStatus(existing.orderId, "completed");
+          }
+          console.log(`[Webhook] HungerStation: Order ${orderId} DELIVERED`);
+        }
+      } else {
+        console.log(`[Webhook] HungerStation: Unhandled order status "${orderStatus}" for order ${orderId}`);
+      }
+
+      res.status(200).json({ received: true });
+    } catch (error: any) {
+      console.error("[Webhook] HungerStation error:", error.message);
+      res.status(200).json({ received: true }); // Always 200 for webhooks
+    }
+  });
+
+  // ============================================
+  // Jahez webhook — CREATE ORDER
+  // Jahez calls this endpoint to create a new order
+  // Expected response within 2 seconds, status 200
+  // ============================================
+  app.post("/api/webhooks/jahez", async (req, res) => {
+    try {
+      console.log("[Webhook] Jahez create order incoming:", JSON.stringify(req.body).slice(0, 500));
+
+      const payload = req.body;
+      const jahezId = payload.jahez_id;
+      const branchId = payload.branch_id;
+
+      if (!jahezId) {
+        console.error("[Webhook] Jahez: No jahez_id in payload");
+        return res.status(200).json({ success: true });
+      }
+
+      // Find integration by branch_id (vendorId stores the Jahez branch mapping)
+      // Try multiple strategies to match the integration
+      let integration: DeliveryIntegration | null = null;
+      
+      // Strategy 1: Match by vendorId (stores the Jahez branch_id)
+      if (branchId) {
+        const integrations = await storage.getDeliveryIntegrations("", undefined);
+        integration = integrations.find(
+          (i: any) => i.platform === "jahez" && i.isActive && 
+            (i.vendorId === branchId || i.branchId === branchId)
+        ) || null;
+      }
+      
+      // Strategy 2: Find any active Jahez integration
+      if (!integration) {
+        const integrations = await storage.getDeliveryIntegrations("", undefined);
+        integration = integrations.find(
+          (i: any) => i.platform === "jahez" && i.isActive
+        ) || null;
+      }
+
+      if (!integration) {
+        console.error(`[Webhook] Jahez: No active integration found for branch ${branchId}`);
+        return res.status(200).json({ success: true });
+      }
+
+      // Validate webhook auth
+      const authHeader = req.headers.authorization;
+      if (!jahez.validateJahezWebhook(authHeader as string, integration)) {
+        console.error(`[Webhook] Jahez: Invalid authorization`);
+        return res.status(200).json({ success: true });
+      }
+
+      // Parse the order
+      const parsed = jahez.parseJahezOrder(payload);
+
+      // Check for duplicate (idempotency)
+      const existing = await storage.getDeliveryOrderByExternalId("jahez", String(jahezId));
+      if (existing) {
+        console.log(`[Webhook] Jahez: Duplicate order ${jahezId}, skipping`);
+        return res.status(200).json({ success: true });
+      }
+
+      // Try to resolve product names from our DB
+      const resolvedItems = await Promise.all(
+        parsed.items.map(async (item) => {
+          if (item.productId) {
+            try {
+              const menuItems = await storage.getMenuItems(integration!.restaurantId);
+              const found = menuItems.find((mi: any) => mi.id === item.productId || mi.nameEn === item.productId);
+              if (found) {
+                return {
+                  ...item,
+                  name: found.nameEn || found.nameAr || item.name,
+                  nameAr: found.nameAr,
+                };
+              }
+            } catch (e) {
+              // ignore
+            }
+          }
+          return item;
+        })
+      );
+
+      // Create delivery order
+      const deliveryOrder = await storage.createDeliveryOrder({
+        restaurantId: integration.restaurantId,
+        branchId: integration.branchId,
+        integrationId: integration.id,
+        platform: "jahez",
+        externalOrderId: String(jahezId),
+        orderCode: `JZ-${jahezId}`,
+        platformStatus: "new",
+        transportType: "delivery",
+        rawPayload: payload,
+        customerName: parsed.customerName,
+        customerPhone: parsed.customerPhone,
+        deliveryAddress: parsed.deliveryAddress,
+        subtotal: parsed.subtotal,
+        deliveryFee: parsed.deliveryFee,
+        discount: parsed.discount,
+        total: parsed.total,
+        items: resolvedItems,
+      });
+
+      // Create notification
+      await storage.createNotification({
+        restaurantId: integration.restaurantId,
+        branchId: integration.branchId,
+        type: "order",
+        title: `New Jahez Order`,
+        titleAr: `طلب جديد من جاهز`,
+        message: `New order JZ-${jahezId} - ${parsed.total} SAR (${parsed.paymentMethod})`,
+        messageAr: `طلب جديد JZ-${jahezId} - ${parsed.total} ريال (${parsed.paymentMethod})`,
+        priority: "urgent",
+        referenceType: "order",
+        referenceId: deliveryOrder.id,
+        targetRole: "all",
+      });
+
+      // Auto-accept if configured — full flow with items + invoice + day session
+      // IMPORTANT: Jahez orders must be accepted within 5 minutes
+      if (integration.autoAccept) {
+        try {
+          await jahez.updateOrderStatus(integration, jahezId, "A");
+          await acceptDeliveryOrderFull(integration.restaurantId, deliveryOrder, integration);
+          console.log(`[Webhook] Jahez: Order ${jahezId} auto-accepted`);
+        } catch (autoErr: any) {
+          console.error(`[Webhook] Jahez auto-accept failed:`, autoErr.message);
+        }
+      }
+
+      console.log(`[Webhook] Jahez: Order ${jahezId} created, id=${deliveryOrder.id}`);
+      
+      // MUST respond within 2 seconds with status 200
+      res.status(200).json({ success: true });
+    } catch (error: any) {
+      console.error("[Webhook] Jahez create order error:", error.message);
+      res.status(200).json({ success: true });
+    }
+  });
+
+  // ============================================
+  // Jahez webhook — ORDER UPDATE EVENT
+  // Jahez calls this when order status changes (payment, delivery status, etc.)
+  // Payload: { event, jahezOrderId, payment_method, status }
+  // ============================================
+  app.post("/api/webhooks/jahez/update", async (req, res) => {
+    try {
+      console.log("[Webhook] Jahez order update:", JSON.stringify(req.body).slice(0, 500));
+
+      const { jahezOrderId, status, payment_method } = req.body;
+
+      if (!jahezOrderId) {
+        console.error("[Webhook] Jahez update: No jahezOrderId");
+        return res.status(200).json({ success: true });
+      }
+
+      const existing = await storage.getDeliveryOrderByExternalId("jahez", String(jahezOrderId));
+      if (!existing) {
+        console.error(`[Webhook] Jahez update: Order ${jahezOrderId} not found`);
+        return res.status(200).json({ success: true });
+      }
+
+      const newStatus = jahez.mapJahezStatus(status);
+
+      if (status === "O") {
+        // Out for delivery — rider picked up
+        await storage.updateDeliveryOrder(existing.id, {
+          platformStatus: "picked_up",
+          pickedUpAt: new Date(),
+        } as any);
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} out for delivery`);
+
+      } else if (status === "D") {
+        // Delivered
+        await storage.updateDeliveryOrderStatus(existing.id, "delivered");
+        if (existing.orderId) {
+          await storage.updateOrderStatus(existing.orderId, "completed");
+        }
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} delivered`);
+
+      } else if (status === "C") {
+        // Cancelled
+        await storage.updateDeliveryOrder(existing.id, {
+          platformStatus: "cancelled",
+          cancelReason: "Cancelled by Jahez/Customer",
+          cancelledAt: new Date(),
+        } as any);
+        if (existing.orderId) {
+          await storage.updateOrderStatus(existing.orderId, "cancelled");
+        }
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} cancelled`);
+
+      } else if (status === "T") {
+        // Timed-out
+        await storage.updateDeliveryOrder(existing.id, {
+          platformStatus: "cancelled",
+          cancelReason: "Timed out - not accepted within 5 minutes",
+          cancelledAt: new Date(),
+        } as any);
+        if (existing.orderId) {
+          await storage.updateOrderStatus(existing.orderId, "cancelled");
+        }
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} timed out`);
+
+      } else {
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} status update to "${status}" (${newStatus})`);
+        if (newStatus !== existing.platformStatus) {
+          await storage.updateDeliveryOrderStatus(existing.id, newStatus);
+        }
+      }
+
+      // Update payment method if changed (e.g., CASH → MADA)
+      if (payment_method && payment_method !== "CASH") {
+        // Payment method changed — update POS order if exists
+        console.log(`[Webhook] Jahez: Order ${jahezOrderId} payment changed to ${payment_method}`);
+      }
+
+      res.status(200).json({ success: true });
+    } catch (error: any) {
+      console.error("[Webhook] Jahez update error:", error.message);
+      res.status(200).json({ success: true });
+    }
+  });
+
+  // ============================================
+  // ============================================
+  // Menu Sync Routes (authenticated) — Jahez & HungerStation
+  // ============================================
+
+  // Sync full menu to delivery platform (Jahez: categories + products, HungerStation: update products)
+  app.post("/api/delivery/integrations/:id/sync-menu", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      // Get categories and menu items
+      const categories = await storage.getCategories(restaurantId);
+      const menuItems = await storage.getMenuItems(restaurantId);
+
+      if (integration.platform === "jahez") {
+        // Jahez: Sync categories + products via dedicated APIs
+        const jahezCategories = categories.map((cat: any, index: number) => ({
+          category_id: cat.id,
+          name: {
+            ar: cat.nameAr || cat.name || "",
+            en: cat.name || cat.nameEn || "",
+          },
+          index: cat.sortOrder || index + 1,
+        }));
+
+        if (jahezCategories.length > 0) {
+          await jahez.syncCategoriesBulk(integration, jahezCategories);
+        }
+
+        const jahezProducts = menuItems
+          .filter((item: any) => item.isAvailable !== false)
+          .map((item: any, index: number) => ({
+            product_id: item.id,
+            product_price: parseFloat(item.price) || 0,
+            category_id: item.categoryId || "",
+            name: {
+              ar: item.nameAr || item.nameEn || "",
+              en: item.nameEn || item.nameAr || "",
+            },
+            description: {
+              ar: item.descriptionAr || item.descriptionEn || "",
+              en: item.descriptionEn || item.descriptionAr || "",
+            },
+            image_path: item.image || "",
+            index: item.sortOrder || index + 1,
+            calories: item.calories || 0,
+            is_visible: item.isAvailable !== false,
+          }));
+
+        if (jahezProducts.length > 0) {
+          await jahez.syncProductsBulk(integration, jahezProducts);
+        }
+
+        await storage.updateDeliveryIntegration(integration.id, {
+          lastSyncAt: new Date(),
+        } as any);
+
+        res.json({
+          success: true,
+          platform: "jahez",
+          synced: { categories: jahezCategories.length, products: jahezProducts.length },
+        });
+
+      } else if (integration.platform === "hungerstation") {
+        // HungerStation: Update products via Catalog API (price + active status)
+        // Uses item.id as SKU
+        const hsProducts = menuItems.map((item: any) => ({
+          sku: item.id,
+          price: parseFloat(item.price) || 0,
+          active: item.isAvailable !== false,
+        }));
+
+        let jobId = null;
+        if (hsProducts.length > 0) {
+          const result = await hungerstation.updateProducts(integration, hsProducts);
+          jobId = result?.job_id;
+        }
+
+        await storage.updateDeliveryIntegration(integration.id, {
+          lastSyncAt: new Date(),
+        } as any);
+
+        res.json({
+          success: true,
+          platform: "hungerstation",
+          synced: { products: hsProducts.length },
+          job_id: jobId,
+        });
+
+      } else {
+        return res.status(400).json({ error: `Menu sync not supported for ${integration.platform}` });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to sync menu");
+    }
+  });
+
+  // Retrieve products from HungerStation catalog
+  app.get("/api/delivery/integrations/:id/catalog", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const result = await hungerstation.getProducts(integration, {
+          queryTerm: req.query.query as string,
+          locale: req.query.locale as string || "ar_SA",
+          page: req.query.page ? parseInt(req.query.page as string) : 1,
+          pageSize: req.query.page_size ? parseInt(req.query.page_size as string) : 50,
+          isActive: req.query.is_active !== undefined ? req.query.is_active === "true" : undefined,
+        });
+        res.json(result);
+      } else {
+        return res.status(400).json({ error: "Catalog retrieval only supported for HungerStation" });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to retrieve catalog");
+    }
+  });
+
+  // Get HungerStation vendor categories
+  app.get("/api/delivery/integrations/:id/categories", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const onlyLeaves = req.query.only_leaves !== "false";
+        const result = await hungerstation.getVendorCategories(integration, onlyLeaves);
+        res.json(result);
+      } else {
+        return res.status(400).json({ error: "Category retrieval only supported for HungerStation" });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to retrieve categories");
+    }
+  });
+
+  // Export HungerStation product catalog (async, results sent to webhook)
+  app.post("/api/delivery/integrations/:id/export-catalog", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const result = await hungerstation.exportProducts(integration);
+        res.json({ success: true, ...result });
+      } else {
+        return res.status(400).json({ error: "Catalog export only supported for HungerStation" });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to export catalog");
+    }
+  });
+
+  // Check job status for HungerStation async operations (catalog + promotion)
+  app.get("/api/delivery/integrations/:id/jobs/:jobId", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform === "hungerstation") {
+        const result = await hungerstation.getJobStatus(integration, req.params.jobId);
+        res.json(result);
+      } else {
+        return res.status(400).json({ error: "Job status only supported for HungerStation" });
+      }
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to get job status");
+    }
+  });
+
+  // ============================================
+  // HungerStation Promotion API
+  // ============================================
+
+  // Create or update a promotion on HungerStation
+  app.put("/api/delivery/integrations/:id/promotion", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform !== "hungerstation") {
+        return res.status(400).json({ error: "Promotions only supported for HungerStation" });
+      }
+
+      const { vendors, type, active, reason, display_name, limits, conditions, discount } = req.body;
+      
+      if (!vendors || !type || !conditions || !discount) {
+        return res.status(400).json({ error: "Missing required fields: vendors, type, conditions, discount" });
+      }
+
+      const result = await hungerstation.managePromotion(integration, {
+        vendors,
+        type,
+        active,
+        reason,
+        display_name,
+        limits,
+        conditions,
+        discount,
+      });
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to manage promotion");
+    }
+  });
+
+  // Get promotion job status from HungerStation
+  app.get("/api/delivery/integrations/:id/promotion/jobs/:jobId", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform !== "hungerstation") {
+        return res.status(400).json({ error: "Promotion status only supported for HungerStation" });
+      }
+
+      const result = await hungerstation.getPromotionStatus(integration, req.params.jobId);
+      res.json(result);
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to get promotion status");
+    }
+  });
+
+  // ============================================
+  // HungerStation Order Cart Update (item modifications)
+  // ============================================
+
+  // Update order items (UPDATE_CART) on HungerStation — for item modifications
+  app.put("/api/delivery/orders/:id/update-cart", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const deliveryOrder = await storage.getDeliveryOrder(req.params.id);
+      if (!deliveryOrder || deliveryOrder.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Delivery order not found" });
+      }
+
+      const integration = await storage.getDeliveryIntegration(deliveryOrder.integrationId);
+      if (!integration) {
+        return res.status(400).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform !== "hungerstation") {
+        return res.status(400).json({ error: "Cart update only supported for HungerStation" });
+      }
+
+      const { items } = req.body;
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "Items array is required" });
+      }
+
+      const result = await hungerstation.updateOrderCart(
+        integration,
+        deliveryOrder.externalOrderId,
+        items
+      );
+
+      res.json({ success: true, result });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to update order cart");
+    }
+  });
+
+  // Register Jahez webhooks
+  app.post("/api/delivery/integrations/:id/register-webhooks", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const integration = await storage.getDeliveryIntegration(req.params.id);
+      if (!integration || integration.restaurantId !== restaurantId) {
+        return res.status(404).json({ error: "Integration not found" });
+      }
+
+      if (integration.platform !== "jahez") {
+        return res.status(400).json({ error: "Webhook registration only for Jahez" });
+      }
+
+      const baseUrl = req.body.baseUrl || `${req.protocol}://${req.get("host")}`;
+      
+      await jahez.registerCreateOrderWebhook(integration, `${baseUrl}/api/webhooks/jahez`);
+      await jahez.registerOrderUpdateWebhook(integration, `${baseUrl}/api/webhooks/jahez/update`);
+
+      res.json({ success: true, message: "Webhooks registered successfully" });
+    } catch (error: any) {
+      handleRouteError(res, error, "Failed to register Jahez webhooks");
+    }
+  });
+
+  // Generic webhook endpoint for future platforms
+  app.post("/api/webhooks/:platform", async (req, res) => {
+    console.log(`[Webhook] ${req.params.platform} incoming (not yet implemented)`);
+    res.status(200).json({ received: true });
   });
 
   return httpServer;

@@ -1,4 +1,4 @@
-import { LayoutDashboard, UtensilsCrossed, ClipboardList, Users, Settings, ChefHat, ShoppingCart, CookingPot, QrCode, Package, BarChart3, Tag, LogOut, UserCheck, CalendarDays, ListOrdered } from "lucide-react";
+import { LayoutDashboard, UtensilsCrossed, ClipboardList, Users, Settings, ShoppingCart, CookingPot, QrCode, Package, BarChart3, Tag, LogOut, UserCheck, FileText, Star } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -17,7 +17,7 @@ import { useLanguage } from "@/lib/i18n";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import type { Restaurant } from "@shared/schema";
-import logoImg from "@assets/logo.jpg";
+
 
 export function AppSidebar() {
   const { t, direction, getLocalizedName } = useLanguage();
@@ -32,16 +32,15 @@ export function AppSidebar() {
     { title: t("dashboard"), url: "/", icon: LayoutDashboard },
     { title: t("pos"), url: "/pos", icon: ShoppingCart },
     { title: t("kitchen"), url: "/kitchen", icon: CookingPot },
-    { title: direction === "rtl" ? "أقسام المطبخ" : "Kitchen Sections", url: "/kitchen-sections", icon: ChefHat },
     { title: t("menu"), url: "/menu", icon: UtensilsCrossed },
     { title: t("orders"), url: "/orders", icon: ClipboardList },
-    { title: t("tables"), url: "/tables", icon: Users },
+    { title: direction === "rtl" ? "الطاولات والحجوزات" : "Tables & Reservations", url: "/tables", icon: Users },
     { title: t("qrCodes"), url: "/qr-codes", icon: QrCode },
     { title: t("inventory"), url: "/inventory", icon: Package },
     { title: t("reports"), url: "/reports", icon: BarChart3 },
+    { title: direction === "rtl" ? "أرشيف الفواتير" : "Invoice Archive", url: "/invoice-archive", icon: FileText },
     { title: direction === "rtl" ? "العملاء" : "Customers", url: "/customers", icon: UserCheck },
-    { title: direction === "rtl" ? "الحجوزات" : "Reservations", url: "/reservations", icon: CalendarDays },
-    { title: direction === "rtl" ? "الطابور" : "Queue", url: "/queue", icon: ListOrdered },
+    { title: direction === "rtl" ? "التقييمات" : "Reviews", url: "/reviews", icon: Star },
     { title: t("promotions"), url: "/promotions", icon: Tag },
     { title: t("settings"), url: "/settings", icon: Settings },
   ];
@@ -63,7 +62,9 @@ export function AppSidebar() {
             {restaurant?.logo ? (
               <img src={restaurant.logo} alt={restaurantName} className="h-10 w-10 rounded-md object-cover" />
             ) : (
-              <img src={logoImg} alt="Trying" className="h-10 w-10 rounded-md object-contain" />
+              <div className="h-10 w-10 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-bold text-lg">
+                {(restaurantName || "T").charAt(0).toUpperCase()}
+              </div>
             )}
             <div className="flex flex-col min-w-0">
               <span className="text-sm font-bold text-foreground truncate" data-testid="text-restaurant-name">

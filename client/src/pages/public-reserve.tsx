@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,17 +8,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowLeft, ArrowRight, CalendarCheck, Check, Globe, ChefHat, Loader2, Users, Clock, MapPin, CreditCard } from "lucide-react";
+import { ArrowLeft, ArrowRight, CalendarCheck, Check, Globe, ChefHat, Loader2, Users, Clock, MapPin, CreditCard, Lock } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { useToast } from "@/hooks/use-toast";
-
-declare global {
-  interface Window {
-    Moyasar?: {
-      init: (config: any) => void;
-    };
-  }
-}
 
 export default function PublicReservePage() {
   const params = useParams<{ restaurantId?: string }>();
@@ -44,9 +36,7 @@ export default function PublicReservePage() {
   const [step, setStep] = useState<"form" | "payment" | "success">("form");
   const [createdReservation, setCreatedReservation] = useState<any>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
-  const [isPaymentFormLoaded, setIsPaymentFormLoaded] = useState(false);
-  const formContainerRef = useRef<HTMLDivElement>(null);
-  const formInitialized = useRef(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   const { data: restaurant, isLoading } = useQuery<any>({
     queryKey: [`/api/public/${restaurantId}/restaurant`],
@@ -119,8 +109,6 @@ export default function PublicReservePage() {
         // Store reservation data and switch to payment step
         setCreatedReservation(data);
         setStep("payment");
-        formInitialized.current = false;
-        setIsPaymentFormLoaded(false);
         setPaymentError(null);
       } else {
         setStep("success");
@@ -162,117 +150,52 @@ export default function PublicReservePage() {
     createReservation.mutate();
   };
 
-  // Load Moyasar payment form when step is "payment"
-  useEffect(() => {
-    if (step !== "payment" || !createdReservation || formInitialized.current) return;
+  // Handle EdfaPay payment redirect when step is "payment"  
+  const handleReservationPayment = async () => {
+    if (!createdReservation || isRedirecting) return;
+    setIsRedirecting(true);
+    setPaymentError(null);
 
     const reservationId = createdReservation.id;
     const baseUrl = window.location.origin;
     const callbackUrl = `${baseUrl}/m/${restaurantId}/reservation-payment/${reservationId}${branchQuery}`;
 
-    const loadMoyasar = async () => {
-      try {
-        const sessionRes = await fetch(`/api/public/${restaurantId}/reservation-payment-session`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            reservationId,
-            amount: depositAmount,
-            callbackUrl,
-          }),
-        });
+    try {
+      const sessionRes = await fetch(`/api/public/${restaurantId}/reservation-payment-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reservationId,
+          amount: depositAmount,
+          callbackUrl,
+        }),
+      });
 
-        if (!sessionRes.ok) {
-          throw new Error("Failed to create payment session");
-        }
+      if (!sessionRes.ok) {
+        throw new Error("Failed to create payment session");
+      }
 
-        const session = await sessionRes.json();
+      const session = await sessionRes.json();
 
-        if (!session.publishableKey || session.publishableKey === "pending_setup") {
-          setPaymentError(
-            language === "ar"
-              ? "بوابة الدفع غير مُعدة بعد. يرجى التواصل مع المطعم."
-              : "Payment gateway not configured yet. Please contact the restaurant."
-          );
-          return;
-        }
-
-        // Load Moyasar CSS
-        if (!document.querySelector('link[href*="moyasar.css"]')) {
-          const link = document.createElement("link");
-          link.rel = "stylesheet";
-          link.href = "https://cdn.moyasar.com/mpf/1.14.0/moyasar.css";
-          document.head.appendChild(link);
-        }
-
-        // Load Moyasar JS
-        if (!document.querySelector('script[src*="moyasar.js"]')) {
-          const script = document.createElement("script");
-          script.src = "https://cdn.moyasar.com/mpf/1.14.0/moyasar.js";
-          script.onload = () => {
-            initMoyasarForm(session);
-          };
-          script.onerror = () => {
-            setPaymentError(
-              language === "ar"
-                ? "فشل تحميل نظام الدفع. يرجى المحاولة مرة أخرى."
-                : "Failed to load payment system. Please try again."
-            );
-          };
-          document.head.appendChild(script);
-        } else if (window.Moyasar) {
-          initMoyasarForm(session);
-        }
-      } catch (err) {
-        console.error("Payment init error:", err);
-        setPaymentError(
+      if (session.action === "redirect" && session.redirectUrl) {
+        window.location.href = session.redirectUrl;
+      } else {
+        throw new Error(
           language === "ar"
-            ? "حدث خطأ أثناء تحميل صفحة الدفع"
-            : "Error loading payment page"
+            ? "بوابة الدفع غير مُعدة بعد. يرجى التواصل مع المطعم."
+            : "Payment gateway not configured yet. Please contact the restaurant."
         );
       }
-    };
-
-    const initMoyasarForm = (session: any) => {
-      if (formInitialized.current || !formContainerRef.current) return;
-      formInitialized.current = true;
-
-      try {
-        window.Moyasar!.init({
-          element: formContainerRef.current,
-          amount: session.amount, // already in halalat from server
-          currency: session.currency,
-          description: session.description,
-          publishable_api_key: session.publishableKey,
-          callback_url: session.callbackUrl,
-          methods: ["creditcard", "applepay", "stcpay"],
-          supported_networks: ["visa", "mastercard", "mada"],
-          apple_pay: {
-            country: "SA",
-            label: session.description || "Reservation Fee",
-            validate_merchant_url: "https://api.moyasar.com/v1/applepay/initiate",
-          },
-          language: language === "ar" ? "ar" : "en",
-          metadata: {
-            reservation_id: reservationId,
-          },
-          on_completed: function (payment: any) {
-            console.log("Reservation payment completed:", payment.id, payment.status);
-          },
-        });
-        setIsPaymentFormLoaded(true);
-      } catch (err) {
-        console.error("Moyasar init error:", err);
-        setPaymentError(
-          language === "ar"
-            ? "فشل تهيئة نظام الدفع"
-            : "Failed to initialize payment system"
-        );
-      }
-    };
-
-    loadMoyasar();
-  }, [step, createdReservation, language]);
+    } catch (err: any) {
+      console.error("Payment init error:", err);
+      setPaymentError(err.message || (
+        language === "ar"
+          ? "حدث خطأ أثناء تحميل صفحة الدفع"
+          : "Error loading payment page"
+      ));
+      setIsRedirecting(false);
+    }
+  };
 
   const today = new Date().toISOString().split("T")[0];
 
@@ -322,7 +245,7 @@ export default function PublicReservePage() {
   const depositAmount = restaurant.reservationDepositAmount || "20.00";
   const BackArrow = direction === "rtl" ? ArrowRight : ArrowLeft;
 
-  // Payment step view - show Moyasar payment form
+  // Payment step view - EdfaPay redirect flow
   if (step === "payment") {
     return (
       <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dark:from-gray-900 dark:to-gray-800" dir={direction}>
@@ -371,8 +294,7 @@ export default function PublicReservePage() {
                   className="mt-3"
                   onClick={() => {
                     setPaymentError(null);
-                    formInitialized.current = false;
-                    setStep("payment"); // re-trigger useEffect
+                    setIsRedirecting(false);
                   }}
                 >
                   {language === "ar" ? "إعادة المحاولة" : "Retry"}
@@ -381,21 +303,30 @@ export default function PublicReservePage() {
             </Card>
           )}
 
-          {!isPaymentFormLoaded && !paymentError && (
-            <div className="flex flex-col items-center justify-center py-8 gap-3">
-              <Loader2 className="h-8 w-8 animate-spin text-blue-600 dark:text-blue-400" />
-              <p className="text-muted-foreground text-sm">
-                {language === "ar" ? "جاري تحميل نظام الدفع..." : "Loading payment form..."}
-              </p>
-            </div>
+          {!paymentError && (
+            <Button
+              className="w-full h-14 text-lg font-bold bg-blue-600 hover:bg-blue-700"
+              onClick={handleReservationPayment}
+              disabled={isRedirecting}
+            >
+              {isRedirecting ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                  {language === "ar" ? "جاري التحويل لصفحة الدفع..." : "Redirecting to payment..."}
+                </>
+              ) : (
+                <>
+                  <Lock className="h-5 w-5 mr-2" />
+                  {language === "ar" ? "ادفع الآن" : "Pay Now"}
+                </>
+              )}
+            </Button>
           )}
-
-          <div ref={formContainerRef} className="moyasar-form-container" />
 
           <p className="text-xs text-center text-muted-foreground">
             {language === "ar"
-              ? "الدفع آمن ومشفر عبر بوابة مؤسر"
-              : "Secure payment powered by Moyasar"}
+              ? "الدفع آمن ومشفر عبر بوابة أدفع باي"
+              : "Secure payment powered by EdfaPay"}
           </p>
         </div>
       </div>

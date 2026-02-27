@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from "react";
 import { apiRequest, queryClient } from "./queryClient";
-import logoImg from "@assets/logo.jpg";
+
 
 interface AuthUser {
   id: string;
@@ -145,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
-          <img src={logoImg} alt="TRYING" className="w-16 h-16 rounded-md object-contain" />
+          <div className="w-16 h-16 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-bold text-3xl">T</div>
           <div className="h-1 w-32 bg-muted rounded-full overflow-hidden">
             <div className="h-full w-1/2 bg-primary rounded-full animate-pulse" />
           </div>

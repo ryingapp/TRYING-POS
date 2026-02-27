@@ -114,6 +114,7 @@ export default function ReservationsPage() {
         tableId: data.tableId || undefined,
         notes: data.notes || undefined,
         source: "phone",
+        branchId: selectedBranchId || null,
       });
       return response.json();
     },
@@ -275,6 +276,7 @@ export default function ReservationsPage() {
                   <Input
                     type="date"
                     value={formData.reservationDate}
+                    min={format(new Date(), "yyyy-MM-dd")}
                     onChange={(e) => setFormData({ ...formData, reservationDate: e.target.value })}
                     required
                   />

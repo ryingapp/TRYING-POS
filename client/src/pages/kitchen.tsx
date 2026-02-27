@@ -6,11 +6,30 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { 
   ChefHat, Clock, UtensilsCrossed, Car, Bike, 
-  Play, CheckCircle, Volume2, MapPin, Printer
+  Play, CheckCircle, Volume2, MapPin, Printer,
+  Settings, Plus, Edit2, Trash2, GripVertical
 } from "lucide-react";
 import type { Order, OrderItem, MenuItem, KitchenSection } from "@shared/schema";
 
@@ -57,6 +76,18 @@ export default function KitchenPage() {
   const { selectedBranchId } = useBranch();
   const prevOrderCountRef = useRef<number | null>(null);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showSectionDialog, setShowSectionDialog] = useState(false);
+  const [editingSection, setEditingSection] = useState<KitchenSection | null>(null);
+  const [autoPrint, setAutoPrint] = useState(() => localStorage.getItem("kitchen-auto-print") === "true");
+  const [sectionForm, setSectionForm] = useState({
+    nameEn: "",
+    nameAr: "",
+    icon: "",
+    color: "#8B1A1A",
+    sortOrder: 0,
+  });
+  const autoPrintedOrdersRef = useRef<Set<string>>(new Set());
 
   const branchParam = selectedBranchId ? `?branch=${selectedBranchId}` : "";
   const sectionParam = selectedSectionId ? `&section=${selectedSectionId}` : "";
@@ -70,7 +101,7 @@ export default function KitchenPage() {
 
   const { data: orders, isLoading, refetch } = useQuery<OrderWithDetails[]>({
     queryKey: [`/api/kitchen/orders${queryParams}`],
-    refetchInterval: 5000,
+    refetchInterval: 10000, // 10 seconds to avoid rate limiting
   });
 
   useEffect(() => {
@@ -108,6 +139,80 @@ export default function KitchenPage() {
     },
   });
 
+  // Kitchen section CRUD mutations
+  const createSectionMutation = useMutation({
+    mutationFn: async (data: any) => apiRequest("POST", "/api/kitchen-sections", { ...data, branchId: selectedBranchId || null }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/kitchen-sections") });
+      toast({ title: language === "ar" ? "تم الإضافة" : "Section Added" });
+      handleCloseSectionDialog();
+    },
+  });
+
+  const updateSectionMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: any }) => apiRequest("PUT", `/api/kitchen-sections/${id}`, { ...data, branchId: selectedBranchId || null }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/kitchen-sections") });
+      toast({ title: language === "ar" ? "تم التحديث" : "Section Updated" });
+      handleCloseSectionDialog();
+    },
+  });
+
+  const deleteSectionMutation = useMutation({
+    mutationFn: async (id: string) => apiRequest("DELETE", `/api/kitchen-sections/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/kitchen-sections") });
+      toast({ title: language === "ar" ? "تم الحذف" : "Section Deleted" });
+    },
+  });
+
+  const handleOpenSectionDialog = (section?: KitchenSection) => {
+    if (section) {
+      setEditingSection(section);
+      setSectionForm({ nameEn: section.nameEn, nameAr: section.nameAr, icon: section.icon || "", color: section.color || "#8B1A1A", sortOrder: section.sortOrder || 0 });
+    } else {
+      setEditingSection(null);
+      setSectionForm({ nameEn: "", nameAr: "", icon: "", color: "#8B1A1A", sortOrder: (kitchenSections?.length || 0) + 1 });
+    }
+    setShowSectionDialog(true);
+  };
+
+  const handleCloseSectionDialog = () => {
+    setShowSectionDialog(false);
+    setEditingSection(null);
+    setSectionForm({ nameEn: "", nameAr: "", icon: "", color: "#8B1A1A", sortOrder: 0 });
+  };
+
+  const handleSectionSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (editingSection) {
+      updateSectionMutation.mutate({ id: editingSection.id, data: sectionForm });
+    } else {
+      createSectionMutation.mutate(sectionForm);
+    }
+  };
+
+  const handleToggleAutoPrint = (checked: boolean) => {
+    setAutoPrint(checked);
+    localStorage.setItem("kitchen-auto-print", String(checked));
+  };
+
+  // Auto-print new orders and change status to preparing
+  useEffect(() => {
+    if (!autoPrint || !orders) return;
+    const pendingOrders = orders.filter(o => o.status === "pending" || o.status === "confirmed");
+    for (const order of pendingOrders) {
+      if (!autoPrintedOrdersRef.current.has(order.id)) {
+        autoPrintedOrdersRef.current.add(order.id);
+        handlePrintOrder(order);
+        // Auto-change status to preparing after printing
+        if (order.status === "pending" || order.status === "confirmed") {
+          updateStatusMutation.mutate({ orderId: order.id, status: "preparing" });
+        }
+      }
+    }
+  }, [orders, autoPrint]);
+
   const getTimeSince = (date: Date | string) => {
     const now = new Date();
     const orderDate = new Date(date);
@@ -140,7 +245,7 @@ export default function KitchenPage() {
 
     const dir = language === "ar" ? "rtl" : "ltr";
     const itemsHtml = (order.items || []).map(item => {
-      const name = item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : "Item";
+      const name = item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item");
       return `
         <div class="item-row">
           <span class="item-name">${name}</span>
@@ -285,6 +390,10 @@ export default function KitchenPage() {
             <Volume2 className="h-4 w-4 me-2" />
             Refresh
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setShowSettings(true)}>
+            <Settings className="h-4 w-4 me-2" />
+            {language === "ar" ? "الإعدادات" : "Settings"}
+          </Button>
         </div>
       </div>
 
@@ -380,7 +489,7 @@ export default function KitchenPage() {
                           {order.items.map((item, idx) => (
                             <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
                               <span className="font-medium">
-                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : "Item"}
+                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
                               </span>
                               <Badge variant="secondary">{item.quantity}x</Badge>
                             </div>
@@ -394,6 +503,12 @@ export default function KitchenPage() {
                         </div>
                       )}
                       
+                      {order.orderType === "delivery" && order.notes && (
+                        <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
+                          <strong>🛵 {language === "ar" ? "توصيل" : "Delivery"}:</strong> {order.notes}
+                        </div>
+                      )}
+
                       <div className="text-sm text-muted-foreground">
                         {t("total")}: {parseFloat(order.total || "0").toFixed(2)} {t("sar")}
                       </div>
@@ -472,7 +587,7 @@ export default function KitchenPage() {
                           {order.items.map((item, idx) => (
                             <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
                               <span className="font-medium">
-                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : "Item"}
+                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
                               </span>
                               <Badge variant="secondary">{item.quantity}x</Badge>
                             </div>
@@ -483,6 +598,12 @@ export default function KitchenPage() {
                       {order.kitchenNotes && (
                         <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
                           <strong>{t("kitchenNotes")}:</strong> {order.kitchenNotes}
+                        </div>
+                      )}
+
+                      {order.orderType === "delivery" && order.notes && (
+                        <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
+                          <strong>🛵 {language === "ar" ? "توصيل" : "Delivery"}:</strong> {order.notes}
                         </div>
                       )}
 
@@ -511,6 +632,152 @@ export default function KitchenPage() {
           </div>
         </div>
       )}
+
+      {/* Settings Dialog */}
+      <Dialog open={showSettings} onOpenChange={setShowSettings}>
+        <DialogContent dir={direction} className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Settings className="h-5 w-5" />
+              {language === "ar" ? "إعدادات المطبخ" : "Kitchen Settings"}
+            </DialogTitle>
+          </DialogHeader>
+
+          {/* Auto Print Toggle */}
+          <div className="flex items-center justify-between p-4 border rounded-lg">
+            <div className="flex items-center gap-3">
+              <Printer className="h-5 w-5 text-muted-foreground" />
+              <div>
+                <p className="font-medium">{language === "ar" ? "الطباعة التلقائية" : "Auto Print"}</p>
+                <p className="text-sm text-muted-foreground">
+                  {language === "ar" ? "طباعة الطلبات الجديدة تلقائياً" : "Automatically print new orders"}
+                </p>
+              </div>
+            </div>
+            <Switch checked={autoPrint} onCheckedChange={handleToggleAutoPrint} />
+          </div>
+
+          {/* Kitchen Sections Management */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <ChefHat className="h-5 w-5" />
+                {language === "ar" ? "أقسام المطبخ" : "Kitchen Sections"}
+              </h3>
+              <Button size="sm" onClick={() => handleOpenSectionDialog()}>
+                <Plus className="h-4 w-4 me-1" />
+                {language === "ar" ? "إضافة قسم" : "Add Section"}
+              </Button>
+            </div>
+
+            {!kitchenSections || kitchenSections.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground border rounded-lg">
+                <ChefHat className="h-10 w-10 mx-auto mb-2 opacity-50" />
+                <p>{language === "ar" ? "لا توجد أقسام مطبخ بعد" : "No kitchen sections yet"}</p>
+                <p className="text-sm mt-1">
+                  {language === "ar" ? "أضف أقسام لتنظيم المطبخ" : "Add sections to organize your kitchen"}
+                </p>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12"></TableHead>
+                    <TableHead className="w-16">{language === "ar" ? "أيقونة" : "Icon"}</TableHead>
+                    <TableHead>{language === "ar" ? "الاسم" : "Name"}</TableHead>
+                    <TableHead className="w-24">{language === "ar" ? "اللون" : "Color"}</TableHead>
+                    <TableHead className="w-24">{language === "ar" ? "الحالة" : "Status"}</TableHead>
+                    <TableHead className="w-32 text-end">{language === "ar" ? "إجراءات" : "Actions"}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {kitchenSections.map((section) => (
+                    <TableRow key={section.id}>
+                      <TableCell><GripVertical className="h-4 w-4 text-muted-foreground" /></TableCell>
+                      <TableCell><span className="text-2xl">{section.icon || "🍽️"}</span></TableCell>
+                      <TableCell className="font-medium">{getLocalizedName(section.nameEn, section.nameAr)}</TableCell>
+                      <TableCell>
+                        <div className="w-6 h-6 rounded border" style={{ backgroundColor: section.color || '#8B1A1A' }} />
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={section.isActive ? "bg-green-50 text-green-700 border-green-200" : "bg-gray-50 text-gray-700 border-gray-200"}>
+                          {section.isActive ? (language === "ar" ? "نشط" : "Active") : (language === "ar" ? "غير نشط" : "Inactive")}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-end">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button variant="ghost" size="icon" onClick={() => handleOpenSectionDialog(section)}>
+                            <Edit2 className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost" size="icon"
+                            onClick={() => { if (confirm(language === "ar" ? "هل تريد حذف هذا القسم؟" : "Delete this section?")) deleteSectionMutation.mutate(section.id); }}
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Section Add/Edit Dialog */}
+      <Dialog open={showSectionDialog} onOpenChange={setShowSectionDialog}>
+        <DialogContent dir={direction}>
+          <DialogHeader>
+            <DialogTitle>
+              {editingSection
+                ? (language === "ar" ? "تعديل القسم" : "Edit Section")
+                : (language === "ar" ? "إضافة قسم جديد" : "Add New Section")}
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSectionSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label>{language === "ar" ? "الاسم بالإنجليزية" : "Name (English)"}</Label>
+              <Input value={sectionForm.nameEn} onChange={(e) => setSectionForm({ ...sectionForm, nameEn: e.target.value })} placeholder="Appetizers" required />
+            </div>
+            <div className="space-y-2">
+              <Label>{language === "ar" ? "الاسم بالعربية" : "Name (Arabic)"}</Label>
+              <Input value={sectionForm.nameAr} onChange={(e) => setSectionForm({ ...sectionForm, nameAr: e.target.value })} placeholder="المقبلات" required />
+            </div>
+            <div className="space-y-2">
+              <Label>{language === "ar" ? "الأيقونة" : "Icon"}</Label>
+              <div className="flex gap-2 flex-wrap">
+                {["🥗", "🍖", "🍕", "🍰", "🚚", "🍜", "🍔", "🍣", "🥘", "☕"].map((icon) => (
+                  <button key={icon} type="button"
+                    className={`w-10 h-10 rounded-lg border-2 flex items-center justify-center text-xl hover:border-primary transition-colors ${sectionForm.icon === icon ? 'border-primary bg-primary/10' : 'border-border'}`}
+                    onClick={() => setSectionForm({ ...sectionForm, icon })}
+                  >{icon}</button>
+                ))}
+              </div>
+              <Input value={sectionForm.icon} onChange={(e) => setSectionForm({ ...sectionForm, icon: e.target.value })} placeholder="🍽️" className="text-center text-2xl h-12" />
+            </div>
+            <div className="space-y-2">
+              <Label>{language === "ar" ? "اللون" : "Color"}</Label>
+              <div className="flex gap-2">
+                <Input type="color" value={sectionForm.color} onChange={(e) => setSectionForm({ ...sectionForm, color: e.target.value })} className="w-20 h-10" />
+                <Input value={sectionForm.color} onChange={(e) => setSectionForm({ ...sectionForm, color: e.target.value })} placeholder="#8B1A1A" className="flex-1" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>{language === "ar" ? "ترتيب العرض" : "Sort Order"}</Label>
+              <Input type="number" value={sectionForm.sortOrder} onChange={(e) => setSectionForm({ ...sectionForm, sortOrder: parseInt(e.target.value) || 0 })} min="0" />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={handleCloseSectionDialog}>{t("cancel")}</Button>
+              <Button type="submit" disabled={createSectionMutation.isPending || updateSectionMutation.isPending}>
+                {editingSection ? t("save") : (language === "ar" ? "إضافة" : "Add")}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

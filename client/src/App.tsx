@@ -39,6 +39,11 @@ import ReservationsPage from "@/pages/reservations";
 import DaySessionPage from "@/pages/day-session";
 import CustomizationsPage from "@/pages/customizations";
 import QueuePage from "@/pages/queue";
+import InvoiceArchivePage from "@/pages/invoice-archive";
+import DeliverySettingsPage from "@/pages/delivery-settings";
+import DeliveryOrdersPage from "@/pages/delivery-orders";
+import ReviewsPage from "@/pages/reviews";
+import KioskPage from "@/pages/kiosk";
 import NotFound from "@/pages/not-found";
 
 function AdminLayout() {
@@ -73,6 +78,11 @@ function AdminLayout() {
               <Route path="/queue" component={QueuePage} />
               <Route path="/day-session" component={DaySessionPage} />
               <Route path="/customizations" component={CustomizationsPage} />
+              <Route path="/invoice-archive" component={InvoiceArchivePage} />
+              <Route path="/delivery-settings" component={DeliverySettingsPage} />
+              <Route path="/delivery-orders" component={DeliveryOrdersPage} />
+              <Route path="/reviews" component={ReviewsPage} />
+              <Route path="/kiosk" component={KioskPage} />
               <Route path="/settings" component={SettingsPage} />
               <Route component={NotFound} />
             </Switch>
@@ -83,9 +93,34 @@ function AdminLayout() {
   );
 }
 
+function LoadingSplash() {
+  return (
+    <div className="fixed inset-0 flex flex-col items-center justify-center bg-background z-50">
+      <div className="flex flex-col items-center gap-6 animate-pulse">
+        <div className="w-24 h-24 rounded-2xl bg-primary flex items-center justify-center shadow-lg">
+          <span className="text-4xl font-black text-primary-foreground tracking-tighter">T</span>
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <span className="text-2xl font-bold text-foreground tracking-wide">TRYING</span>
+          <span className="text-sm text-muted-foreground">منصة إدارة المطاعم</span>
+        </div>
+        <div className="flex gap-1.5 mt-2">
+          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
+          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "150ms" }} />
+          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "300ms" }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AppRouter() {
   const [location] = useLocation();
-  const { isAuthenticated, user } = useAuth();
+  const { isAuthenticated, user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <LoadingSplash />;
+  }
   
   const isCustomerRoute = location === "/order" || 
     location.startsWith("/order/") || 
@@ -94,6 +129,7 @@ function AppRouter() {
     location.startsWith("/payment/") ||
     location.startsWith("/payment-callback/") ||
     location.startsWith("/m/") ||
+    location.startsWith("/kiosk/") ||
     location.match(/^\/m\/[^/]+\/reservation-payment\//);
 
   const isAuthRoute = location === "/login" || location === "/register";
@@ -110,6 +146,7 @@ function AppRouter() {
         <Route path="/m/:restaurantId/table/:tableId" component={CustomerMenuPage} />
         <Route path="/m/:restaurantId/:tableId" component={CustomerMenuPage} />
         <Route path="/m/:restaurantId" component={PublicLandingPage} />
+        <Route path="/kiosk/:restaurantId" component={KioskPage} />
         <Route path="/order/:tableId?" component={CustomerMenuPage} />
         <Route path="/order-status/:orderId" component={OrderStatusPage} />
         <Route path="/payment/:orderId" component={PaymentPage} />

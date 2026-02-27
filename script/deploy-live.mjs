@@ -7,7 +7,7 @@ const USER = "root";
 const PASS = "Dr&4f1guk@jID,W)d?tg";
 const APP_DIR = "/opt/trying";
 const DOMAIN = "tryingpos.com";
-const DB_URL = "postgresql://postgres:UVNPULADUy09n0jS@db.lwfcttkqqejzvdfzauwv.supabase.co:5432/postgres";
+const DB_URL = process.env.DATABASE_URL || "postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require";
 
 const archivePath = resolve("C:\\Users\\msaz1\\Downloads\\trying-deploy.tar.gz");
 const deployScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\deploy.sh");

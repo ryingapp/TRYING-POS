@@ -644,7 +644,7 @@ export default function CustomerMenuPage() {
       customerPhone,
       customerAddress,
       kitchenNotes,
-      paymentMethod: paymentMethod === "tap_to_pay" ? "moyasar_online" : "cash",
+      paymentMethod: paymentMethod === "tap_to_pay" ? "edfapay_online" : "cash",
       items: cart.map((c) => {
         const unitPrice = getItemPrice(c);
         return {

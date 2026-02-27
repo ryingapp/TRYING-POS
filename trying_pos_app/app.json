@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "TryingPOS",
+    "slug": "trying-pos",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#8B1A1A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tryingapp.pos",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "نحتاج صلاحية البلوتوث للطباعة"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#8B1A1A"
+      },
+      "package": "com.tryingapp.pos",
+      "minSdkVersion": 29,
+      "compileSdkVersion": 36,
+      "targetSdkVersion": 36,
+      "permissions": [
+        "android.permission.NFC",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "extra": {
+      "apiUrl": "https://tryingpos.com",
+      "edfaPayAuthToken": "",
+      "edfaPayPartnerConfig": "",
+      "edfaPayEnv": "SANDBOX"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "./plugins/withEdfaPayMaven"
+    ]
+  }
+}

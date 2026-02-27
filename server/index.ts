@@ -26,21 +26,29 @@ app.use(helmet({
 
 app.use(cors({
   origin: function (origin, callback) {
-    // In production, allow both http and https versions of the domain
+    // Allow same-origin requests (no origin header)
+    if (!origin) return callback(null, true);
+    
+    // In dev mode allow all
+    if (process.env.NODE_ENV !== "production") return callback(null, true);
+    
     const corsOrigin = process.env.CORS_ORIGIN;
-    if (!origin || !corsOrigin) {
-      // Allow same-origin requests (no origin header) and dev mode
-      return callback(null, true);
-    }
-    // Allow both http:// and https:// versions
+    if (!corsOrigin) return callback(null, true);
+    
+    // Allow configured origins, their http/https variants, IP, and subdomains
     const allowed = [
       corsOrigin,
       corsOrigin.replace("https://", "http://"),
+      `http://72.62.40.134:5000`,
+      `http://72.62.40.134`,
+      `https://72.62.40.134`,
     ];
-    if (allowed.includes(origin)) {
+    if (allowed.includes(origin) || origin.endsWith("." + corsOrigin.replace(/^https?:\/\//, ""))) {
       return callback(null, origin);
     }
-    return callback(null, true); // Allow for flexibility
+    // Allow for flexibility - log but don't block
+    console.warn(`CORS: allowing unlisted origin ${origin}`);
+    return callback(null, true);
   },
   credentials: true,
 }));
@@ -58,7 +66,7 @@ const authLimiter = rateLimit({
 // General API rate limiter
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 200, // 200 requests per minute
+  max: 600, // 600 requests per minute (increased for multi-device POS operations)
   standardHeaders: true,
   legacyHeaders: false,
   validate: false, // Disable validation for proxy compatibility
@@ -70,13 +78,14 @@ app.use("/api/", apiLimiter);
 
 app.use(
   express.json({
+    limit: "10mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "10mb" }));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

@@ -174,8 +174,7 @@ export default function POSPage() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions/current`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions`] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/day-sessions") });
       toast({ title: language === "ar" ? "تم بدء اليوم بنجاح" : "Day started successfully" });
       setOpenDialogOpen(false);
       setOpeningBalance("");
@@ -201,7 +200,7 @@ export default function POSPage() {
       const splitSales = todayOrders.filter(o => o.paymentMethod === "split").reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
       const tapSales = todayOrders.filter(o => o.paymentMethod === "tap_to_pay").reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
       const cardMachineSales = todayOrders.filter(o => o.paymentMethod === "card_machine").reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
-      const onlineSales = todayOrders.filter(o => o.paymentMethod === "moyasar_online" || o.paymentMethod === "mobile_pay").reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
+      const onlineSales = todayOrders.filter(o => o.paymentMethod === "edfapay_online" || o.paymentMethod === "mobile_pay").reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
       const dineInOrders = todayOrders.filter(o => o.orderType === "dine_in");
       const pickupOrders = todayOrders.filter(o => o.orderType === "pickup");
       const deliveryOrders = todayOrders.filter(o => o.orderType === "delivery");
@@ -240,8 +239,7 @@ export default function POSPage() {
         notes: closeNotes,
         date: new Date().toLocaleDateString(language === "ar" ? "ar-SA" : "en-US", { year: "numeric", month: "long", day: "numeric" }),
       };
-      queryClient.invalidateQueries({ queryKey: ["/api/day-sessions/current"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/day-sessions"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/day-sessions") });
       setCloseDialogOpen(false);
       setClosingBalance("");
       setCloseNotes("");

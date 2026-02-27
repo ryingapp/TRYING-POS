@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Download, Printer, QrCode, Store, Table } from "lucide-react";
+import { Download, Printer, QrCode, Store, Table, Monitor } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { useBranch } from "@/lib/branch";
 import { useAuth } from "@/lib/auth";
@@ -103,6 +103,39 @@ export default function QRCodesPage() {
     img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgData)));
   };
 
+  const downloadKioskQR = () => {
+    const svg = document.getElementById("qr-kiosk");
+    if (!svg) return;
+
+    const svgData = new XMLSerializer().serializeToString(svg);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+
+    img.onload = () => {
+      canvas.width = 400;
+      canvas.height = 480;
+      if (ctx) {
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 50, 30, 300, 300);
+        ctx.fillStyle = "black";
+        ctx.font = "bold 24px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(direction === "rtl" ? "كشك الطلب الذاتي" : "Self-Order Kiosk", 200, 380);
+        ctx.font = "18px Arial";
+        ctx.fillText(t("scanToOrder"), 200, 420);
+      }
+
+      const link = document.createElement("a");
+      link.download = "kiosk-qr.png";
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    };
+
+    img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgData)));
+  };
+
   if (isLoading) {
     return (
       <div className="p-6 space-y-6" dir={direction}>
@@ -159,6 +192,42 @@ export default function QRCodesPage() {
           <Button
             data-testid="button-download-general-qr"
             onClick={downloadGeneralQR}
+            className="gap-2"
+          >
+            <Download className="h-4 w-4" />
+            {t("downloadQR")}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Kiosk QR Code */}
+      <Card data-testid="card-kiosk-qr">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Monitor className="h-5 w-5" />
+            {direction === "rtl" ? "كشك الطلب الذاتي" : "Self-Order Kiosk"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col items-center gap-4">
+          <div className="p-4 bg-white rounded-lg">
+            <QRCodeSVG
+              id="qr-kiosk"
+              value={`${baseUrl}/kiosk/${restaurantSlug}${branchSlug ? `?b=${branchSlug}` : ""}`}
+              size={200}
+              level="H"
+              includeMargin
+            />
+          </div>
+          <p className="text-xs text-muted-foreground text-center break-all select-all bg-muted/50 rounded px-3 py-2 max-w-xs" dir="ltr">
+            {`${baseUrl}/kiosk/${restaurantSlug}${branchSlug ? `?b=${branchSlug}` : ""}`}
+          </p>
+          <p className="text-sm text-muted-foreground text-center">
+            {direction === "rtl" 
+              ? "واجهة مصممة للشاشات اللمسية وأجهزة الطلب الذاتي" 
+              : "Interface designed for touchscreens and self-ordering devices"}
+          </p>
+          <Button
+            onClick={downloadKioskQR}
             className="gap-2"
           >
             <Download className="h-4 w-4" />

@@ -37,12 +37,12 @@ export default function OrderStatusPage() {
 
   const { data: order, isLoading: orderLoading } = useQuery<Order>({
     queryKey: [orderEndpoint],
-    refetchInterval: 5000,
+    refetchInterval: 15000, // 15 seconds to avoid rate limiting
   });
 
   const { data: orderItems, isLoading: itemsLoading } = useQuery<(OrderItem & { menuItem?: MenuItem })[]>({
     queryKey: [itemsEndpoint],
-    refetchInterval: 5000,
+    refetchInterval: 15000, // 15 seconds to avoid rate limiting
     enabled: !!orderId,
   });
 

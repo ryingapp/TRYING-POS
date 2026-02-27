@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Search, Edit2, Trash2, FolderOpen, UtensilsCrossed, Flame, AlertTriangle, Coffee, Footprints, Wheat, Milk, Fish, Egg, Leaf, Star, Sparkles, Settings2, ChevronDown, Package } from "lucide-react";
+import { Plus, Search, Edit2, Trash2, FolderOpen, UtensilsCrossed, Flame, AlertTriangle, Coffee, Footprints, Wheat, Milk, Fish, Egg, Leaf, Star, Sparkles, Settings2, ChevronDown, Package, Beaker, X } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -59,7 +59,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/lib/i18n";
 import { useBranch } from "@/lib/branch";
 import { queryClient as defaultQueryClient, apiRequest } from "@/lib/queryClient";
-import type { Category, MenuItem, InsertCategory, InsertMenuItem, KitchenSection } from "@shared/schema";
+import type { Category, MenuItem, InsertCategory, InsertMenuItem, KitchenSection, InventoryItem, Recipe } from "@shared/schema";
 
 // Allergen options
 const allergenOptions = [
@@ -261,6 +261,9 @@ function MenuItemForm({
   const [showVariantForm, setShowVariantForm] = useState(false);
   const [variantForm, setVariantForm] = useState({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
 
+  // Recipe state
+  const [recipeIngredient, setRecipeIngredient] = useState({ inventoryItemId: "", quantity: "", unit: "" });
+
   const itemAny = item as any;
 
   const form = useForm<z.infer<typeof menuItemFormSchema>>({
@@ -428,6 +431,71 @@ function MenuItemForm({
     },
   });
 
+  // ==== Recipe / Ingredients ====
+  const { data: recipes = [], isLoading: loadingRecipes } = useQuery<Recipe[]>({
+    queryKey: ["/api/menu-items", savedItemId, "recipes"],
+    queryFn: async () => {
+      if (!savedItemId) return [];
+      const response = await fetch(`/api/menu-items/${savedItemId}/recipes`);
+      if (!response.ok) throw new Error("Failed to fetch recipes");
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    },
+    enabled: !!savedItemId,
+  });
+
+  const { data: inventoryItems = [] } = useQuery<InventoryItem[]>({
+    queryKey: ["/api/inventory"],
+    queryFn: async () => {
+      const response = await fetch("/api/inventory");
+      if (!response.ok) throw new Error("Failed to fetch inventory");
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    },
+    enabled: !!savedItemId,
+  });
+
+  const createRecipeMutation = useMutation({
+    mutationFn: async (data: { menuItemId: string; inventoryItemId: string; quantity: string; unit: string }) => {
+      const res = await fetch("/api/recipes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/menu-items", savedItemId, "recipes"] });
+      setRecipeIngredient({ inventoryItemId: "", quantity: "", unit: "" });
+      toast({ title: language === "ar" ? "تمت إضافة المكون" : "Ingredient added" });
+    },
+    onError: () => {
+      toast({ title: language === "ar" ? "فشل في إضافة المكون" : "Failed to add ingredient", variant: "destructive" });
+    },
+  });
+
+  const deleteRecipeMutation = useMutation({
+    mutationFn: async (recipeId: string) => {
+      const res = await fetch(`/api/recipes/${recipeId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/menu-items", savedItemId, "recipes"] });
+      toast({ title: language === "ar" ? "تم حذف المكون" : "Ingredient removed" });
+    },
+  });
+
+  const handleAddIngredient = () => {
+    if (!recipeIngredient.inventoryItemId || !recipeIngredient.quantity) return;
+    createRecipeMutation.mutate({
+      menuItemId: savedItemId!,
+      inventoryItemId: recipeIngredient.inventoryItemId,
+      quantity: recipeIngredient.quantity,
+      unit: recipeIngredient.unit,
+    });
+  };
+
   const onSubmit = (data: z.infer<typeof menuItemFormSchema>) => {
     const payload: any = {
       ...data,
@@ -460,7 +528,7 @@ function MenuItemForm({
     <div className="space-y-4">
      <Form {...form}>
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
           <TabsTrigger value="basic" className="text-xs sm:text-sm">
             <UtensilsCrossed className="h-3.5 w-3.5 me-1.5 hidden sm:inline" />
             {language === "ar" ? "أساسي" : "Basic"}
@@ -474,6 +542,11 @@ function MenuItemForm({
             <Settings2 className="h-3.5 w-3.5 me-1.5 hidden sm:inline" />
             {language === "ar" ? "تخصيص" : "Custom"}
             {linkedGroupIds.length > 0 && <Badge variant="secondary" className="ms-1.5 h-5 px-1.5 text-[10px]">{linkedGroupIds.length}</Badge>}
+          </TabsTrigger>
+          <TabsTrigger value="recipe" className="text-xs sm:text-sm" disabled={!savedItemId}>
+            <Beaker className="h-3.5 w-3.5 me-1.5 hidden sm:inline" />
+            {language === "ar" ? "الوصفة" : "Recipe"}
+            {recipes.length > 0 && <Badge variant="secondary" className="ms-1.5 h-5 px-1.5 text-[10px]">{recipes.length}</Badge>}
           </TabsTrigger>
           <TabsTrigger value="nutrition" className="text-xs sm:text-sm">
             <Flame className="h-3.5 w-3.5 me-1.5 hidden sm:inline" />
@@ -853,6 +926,176 @@ function MenuItemForm({
                 <Button variant="outline" size="sm" onClick={() => setActiveTab("variants")}>
                   {language === "ar" ? "← السابق: الأحجام" : "← Back: Variants"}
                 </Button>
+                <Button variant="outline" size="sm" onClick={() => setActiveTab("recipe")}>
+                  {language === "ar" ? "التالي: الوصفة →" : "Next: Recipe →"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ====== TAB 4: Recipe / Ingredients ====== */}
+        <TabsContent value="recipe" className="mt-4">
+          {!savedItemId ? (
+            <div className="text-center py-8 text-muted-foreground">
+              {language === "ar" ? "احفظ الصنف أولاً لإضافة الوصفة" : "Save the item first to add recipe"}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Add ingredient form */}
+              <div className="border rounded-lg p-4 space-y-3">
+                <h4 className="font-semibold text-sm flex items-center gap-2">
+                  <Beaker className="h-4 w-4 text-green-600" />
+                  {language === "ar" ? "إضافة مكون من المخزون" : "Add Ingredient from Inventory"}
+                </h4>
+                <div className="grid grid-cols-12 gap-2 items-end">
+                  <div className="col-span-5">
+                    <Label className="text-xs mb-1 block">{language === "ar" ? "المكون" : "Ingredient"}</Label>
+                    <select
+                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors"
+                      value={recipeIngredient.inventoryItemId}
+                      onChange={(e) => {
+                        const item = inventoryItems.find((i: InventoryItem) => i.id === e.target.value);
+                        setRecipeIngredient({
+                          ...recipeIngredient,
+                          inventoryItemId: e.target.value,
+                          unit: item?.unit || "",
+                        });
+                      }}
+                    >
+                      <option value="">{language === "ar" ? "اختر مكون..." : "Select ingredient..."}</option>
+                      {inventoryItems
+                        .filter((item: InventoryItem) => !recipes.some((r: Recipe) => r.inventoryItemId === item.id))
+                        .map((item: InventoryItem) => (
+                          <option key={item.id} value={item.id}>
+                            {language === "ar" ? (item.nameAr || item.name) : item.name}
+                            {" "}({item.currentStock} {item.unit})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div className="col-span-3">
+                    <Label className="text-xs mb-1 block">{language === "ar" ? "الكمية" : "Quantity"}</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                      value={recipeIngredient.quantity}
+                      onChange={(e) => setRecipeIngredient({ ...recipeIngredient, quantity: e.target.value })}
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <Label className="text-xs mb-1 block">{language === "ar" ? "الوحدة" : "Unit"}</Label>
+                    <Input
+                      value={recipeIngredient.unit}
+                      readOnly
+                      className="bg-muted"
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full"
+                      onClick={handleAddIngredient}
+                      disabled={!recipeIngredient.inventoryItemId || !recipeIngredient.quantity || createRecipeMutation.isPending}
+                    >
+                      {language === "ar" ? "إضافة" : "Add"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Recipe ingredients list */}
+              {loadingRecipes ? (
+                <div className="text-center py-4 text-muted-foreground text-sm">
+                  {language === "ar" ? "جاري التحميل..." : "Loading..."}
+                </div>
+              ) : recipes.length === 0 ? (
+                <div className="text-center py-8 border rounded-lg">
+                  <Beaker className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+                  <p className="text-sm text-muted-foreground">
+                    {language === "ar" ? "لم يتم إضافة مكونات بعد" : "No ingredients added yet"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {language === "ar" ? "أضف مكونات من المخزون لحساب التكلفة وخصم المخزون تلقائياً" : "Add inventory ingredients to auto-calculate cost & deduct stock"}
+                  </p>
+                </div>
+              ) : (
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="text-start p-2 font-medium">{language === "ar" ? "المكون" : "Ingredient"}</th>
+                        <th className="text-center p-2 font-medium">{language === "ar" ? "الكمية" : "Qty"}</th>
+                        <th className="text-center p-2 font-medium">{language === "ar" ? "الوحدة" : "Unit"}</th>
+                        <th className="text-center p-2 font-medium">{language === "ar" ? "تكلفة الوحدة" : "Unit Cost"}</th>
+                        <th className="text-center p-2 font-medium">{language === "ar" ? "التكلفة" : "Cost"}</th>
+                        <th className="text-center p-2 font-medium w-10"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recipes.map((recipe: any) => {
+                        const invItem = inventoryItems.find((i: InventoryItem) => i.id === recipe.inventoryItemId);
+                        const unitCost = invItem?.costPerUnit ? parseFloat(invItem.costPerUnit) : 0;
+                        const qty = parseFloat(recipe.quantity) || 0;
+                        const lineCost = unitCost * qty;
+                        return (
+                          <tr key={recipe.id} className="border-t">
+                            <td className="p-2">
+                              <span className="font-medium">
+                                {language === "ar" ? (invItem?.nameAr || invItem?.name || "—") : (invItem?.name || "—")}
+                              </span>
+                              {invItem && parseFloat(String(invItem.currentStock)) <= parseFloat(String(invItem.minStock || 0)) && (
+                                <span className="text-xs text-red-500 block">
+                                  {language === "ar" ? "⚠ مخزون منخفض" : "⚠ Low stock"}
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-2 text-center">{qty}</td>
+                            <td className="p-2 text-center">{recipe.unit}</td>
+                            <td className="p-2 text-center">{unitCost.toFixed(2)}</td>
+                            <td className="p-2 text-center font-medium">{lineCost.toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}</td>
+                            <td className="p-2 text-center">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 w-7 p-0 text-red-500 hover:text-red-700"
+                                onClick={() => deleteRecipeMutation.mutate(recipe.id)}
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="bg-muted/30">
+                      <tr className="border-t font-semibold">
+                        <td className="p-2" colSpan={4}>
+                          {language === "ar" ? "إجمالي تكلفة الوصفة" : "Total Recipe Cost"}
+                        </td>
+                        <td className="p-2 text-center">
+                          {recipes.reduce((sum: number, r: any) => {
+                            const inv = inventoryItems.find((i: InventoryItem) => i.id === r.inventoryItemId);
+                            const uc = inv?.costPerUnit ? parseFloat(inv.costPerUnit) : 0;
+                            return sum + uc * (parseFloat(r.quantity) || 0);
+                          }, 0).toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
+                        </td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+
+              {/* Navigation */}
+              <div className="flex justify-between">
+                <Button variant="outline" size="sm" onClick={() => setActiveTab("customizations")}>
+                  {language === "ar" ? "← السابق: التخصيصات" : "← Back: Customizations"}
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => setActiveTab("nutrition")}>
                   {language === "ar" ? "التالي: المعلومات الغذائية →" : "Next: Nutrition →"}
                 </Button>
@@ -861,7 +1104,7 @@ function MenuItemForm({
           )}
         </TabsContent>
 
-        {/* ====== TAB 4: Nutrition & Labels ====== */}
+        {/* ====== TAB 5: Nutrition & Labels ====== */}
         <TabsContent value="nutrition" className="mt-4">
             <div className="space-y-4">
               {/* Nutritional Info Header */}

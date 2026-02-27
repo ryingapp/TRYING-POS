@@ -2,7 +2,7 @@ import pg from "pg";
 const { Pool } = pg;
 
 const pool = new Pool({
-  connectionString: "postgresql://postgres:UVNPULADUy09n0jS@db.lwfcttkqqejzvdfzauwv.supabase.co:5432/postgres",
+  connectionString: process.env.DATABASE_URL || "postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require",
 });
 
 async function main() {

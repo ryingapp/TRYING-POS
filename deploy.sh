@@ -6,7 +6,7 @@ echo "  TRYING - Production Deployment Script"
 echo "========================================="
 
 APP_DIR="/opt/trying"
-DB_URL="postgresql://postgres:UVNPULADUy09n0jS@db.lwfcttkqqejzvdfzauwv.supabase.co:5432/postgres"
+DB_URL="${DATABASE_URL:-postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require}"
 DOMAIN="tryingpos.com"
 PORT=5000
 

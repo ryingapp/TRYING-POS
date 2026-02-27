@@ -1,7 +1,9 @@
 import { 
-  restaurants, categories, menuItems, tables, orders, orderItems, invoices, branches, users, inventoryItems, inventoryTransactions, recipes, printers, moyasarMerchants, moyasarDocuments, paymentTransactions, moyasarInvoices, applePayDomains,
+  restaurants, categories, menuItems, tables, orders, orderItems, invoices, branches, users, inventoryItems, inventoryTransactions, recipes, printers, paymentTransactions,
+  edfapayMerchants, edfapayInvoices,
   reservations, promotions, coupons, couponUsage, reviews, menuItemVariants, customizationGroups, customizationOptions, menuItemCustomizations, orderItemCustomizations, queueEntries, queueCounters,
-  daySessions, cashTransactions, notifications, notificationSettings, customers, orderAuditLog, kitchenSections,
+  daySessions, cashTransactions, notifications, notificationSettings, customers, orderAuditLog, kitchenSections, invoiceAuditLog,
+  deliveryIntegrations, deliveryOrders,
   type Restaurant, type InsertRestaurant,
   type Category, type InsertCategory,
   type MenuItem, type InsertMenuItem,
@@ -15,11 +17,9 @@ import {
   type InventoryTransaction, type InsertInventoryTransaction,
   type Recipe, type InsertRecipe,
   type Printer, type InsertPrinter,
-  type MoyasarMerchant, type InsertMoyasarMerchant,
-  type MoyasarDocument, type InsertMoyasarDocument,
   type PaymentTransaction, type InsertPaymentTransaction,
-  type MoyasarInvoice, type InsertMoyasarInvoice,
-  type ApplePayDomain, type InsertApplePayDomain,
+  type EdfapayMerchant, type InsertEdfapayMerchant,
+  type EdfapayInvoice, type InsertEdfapayInvoice,
   type Reservation, type InsertReservation,
   type Promotion, type InsertPromotion,
   type Coupon, type InsertCoupon,
@@ -38,6 +38,9 @@ import {
   type Customer, type InsertCustomer,
   type Review, type InsertReview,
   type KitchenSection, type InsertKitchenSection,
+  type InvoiceAuditLog, type InsertInvoiceAuditLog,
+  type DeliveryIntegration, type InsertDeliveryIntegration,
+  type DeliveryOrder, type InsertDeliveryOrder,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, asc, sql, and, gte, lte, or, isNull } from "drizzle-orm";
@@ -99,9 +102,10 @@ export interface IStorage {
   getInvoices(restaurantId: string): Promise<Invoice[]>;
   getInvoice(id: string): Promise<Invoice | undefined>;
   getInvoiceByOrder(orderId: string): Promise<Invoice | undefined>;
+  getCreditNoteForInvoice(originalInvoiceId: string): Promise<Invoice | undefined>;
   createInvoice(data: InsertInvoice): Promise<Invoice>;
   updateInvoice(id: string, data: Partial<InsertInvoice>): Promise<Invoice | undefined>;
-  getNextInvoiceNumber(restaurantId: string): Promise<string>;
+  getNextInvoiceNumber(restaurantId: string, branchId?: string | null): Promise<string>;
   
   // Branches
   getBranches(restaurantId: string): Promise<Branch[]>;
@@ -169,41 +173,24 @@ export interface IStorage {
   getUserByEmail(email: string): Promise<User | undefined>;
   updateUserLastLogin(id: string): Promise<void>;
   
-  // Moyasar Merchants
-  getMoyasarMerchant(restaurantId: string): Promise<MoyasarMerchant | undefined>;
-  getMoyasarMerchantById(id: string): Promise<MoyasarMerchant | undefined>;
-  getMoyasarMerchantByMoyasarId(moyasarId: string): Promise<MoyasarMerchant | undefined>;
-  createMoyasarMerchant(data: InsertMoyasarMerchant): Promise<MoyasarMerchant>;
-  updateMoyasarMerchant(id: string, data: Partial<InsertMoyasarMerchant>): Promise<MoyasarMerchant | undefined>;
-  deleteMoyasarMerchant(id: string): Promise<void>;
-  
-  // Moyasar Documents
-  getMoyasarDocuments(merchantId: string): Promise<MoyasarDocument[]>;
-  getMoyasarDocument(id: string): Promise<MoyasarDocument | undefined>;
-  getMoyasarDocumentByType(merchantId: string, documentType: string): Promise<MoyasarDocument | undefined>;
-  createMoyasarDocument(data: InsertMoyasarDocument): Promise<MoyasarDocument>;
-  updateMoyasarDocument(id: string, data: Partial<InsertMoyasarDocument>): Promise<MoyasarDocument | undefined>;
-  deleteMoyasarDocument(id: string): Promise<void>;
-
   // Payment Transactions
   getPaymentTransactions(restaurantId: string, orderId?: string): Promise<PaymentTransaction[]>;
   getPaymentTransaction(id: string): Promise<PaymentTransaction | undefined>;
-  getPaymentTransactionByMoyasarId(moyasarPaymentId: string): Promise<PaymentTransaction | undefined>;
   createPaymentTransaction(data: InsertPaymentTransaction): Promise<PaymentTransaction>;
   updatePaymentTransaction(id: string, data: Partial<InsertPaymentTransaction>): Promise<PaymentTransaction | undefined>;
 
-  // Moyasar Invoices
-  getMoyasarInvoices(restaurantId: string): Promise<MoyasarInvoice[]>;
-  getMoyasarInvoice(id: string): Promise<MoyasarInvoice | undefined>;
-  getMoyasarInvoiceByMoyasarId(moyasarInvoiceId: string): Promise<MoyasarInvoice | undefined>;
-  createMoyasarInvoice(data: InsertMoyasarInvoice): Promise<MoyasarInvoice>;
-  updateMoyasarInvoice(id: string, data: Partial<InsertMoyasarInvoice>): Promise<MoyasarInvoice | undefined>;
-
-  // Apple Pay Domains
-  getApplePayDomains(restaurantId: string): Promise<ApplePayDomain[]>;
-  createApplePayDomain(data: InsertApplePayDomain): Promise<ApplePayDomain>;
-  updateApplePayDomain(id: string, data: Partial<InsertApplePayDomain>): Promise<ApplePayDomain | undefined>;
-  deleteApplePayDomain(id: string): Promise<void>;
+  // EdfaPay Merchants
+  getEdfapayMerchant(restaurantId: string): Promise<EdfapayMerchant | undefined>;
+  createEdfapayMerchant(data: InsertEdfapayMerchant): Promise<EdfapayMerchant>;
+  updateEdfapayMerchant(id: string, data: Partial<InsertEdfapayMerchant>): Promise<EdfapayMerchant | undefined>;
+  
+  // EdfaPay Invoices
+  getEdfapayInvoices(restaurantId: string): Promise<EdfapayInvoice[]>;
+  createEdfapayInvoice(data: InsertEdfapayInvoice): Promise<EdfapayInvoice>;
+  updateEdfapayInvoice(id: string, data: Partial<InsertEdfapayInvoice>): Promise<EdfapayInvoice | undefined>;
+  
+  // Payment transaction by EdfaPay transaction ID
+  getPaymentTransactionByEdfapayId(edfapayTransactionId: string): Promise<PaymentTransaction | undefined>;
   
   // ===============================
   // 1. RESERVATIONS - نظام الحجوزات
@@ -244,6 +231,7 @@ export interface IStorage {
   getReviews(restaurantId: string): Promise<Review[]>;
   getReviewByOrder(orderId: string): Promise<Review | undefined>;
   createReview(data: InsertReview): Promise<Review>;
+  updateReviewVisibility(id: string, restaurantId: string, isPublic: boolean): Promise<void>;
   getAverageRating(restaurantId: string): Promise<{ average: number; count: number }>;
   
   // ===============================
@@ -319,6 +307,24 @@ export interface IStorage {
   // ===============================
   createOrderAuditLog(data: any): Promise<any>;
   getOrderAuditLog(orderId: string): Promise<any[]>;
+
+  // ===============================
+  // DELIVERY INTEGRATIONS - تكامل منصات التوصيل
+  // ===============================
+  getDeliveryIntegrations(restaurantId: string, branchId?: string): Promise<DeliveryIntegration[]>;
+  getDeliveryIntegration(id: string): Promise<DeliveryIntegration | undefined>;
+  getDeliveryIntegrationByVendor(platform: string, vendorId: string): Promise<DeliveryIntegration | undefined>;
+  createDeliveryIntegration(data: InsertDeliveryIntegration): Promise<DeliveryIntegration>;
+  updateDeliveryIntegration(id: string, data: Partial<InsertDeliveryIntegration>): Promise<DeliveryIntegration | undefined>;
+  deleteDeliveryIntegration(id: string): Promise<void>;
+
+  // Delivery Orders
+  getDeliveryOrders(restaurantId: string, branchId?: string): Promise<DeliveryOrder[]>;
+  getDeliveryOrder(id: string): Promise<DeliveryOrder | undefined>;
+  getDeliveryOrderByExternalId(platform: string, externalOrderId: string): Promise<DeliveryOrder | undefined>;
+  createDeliveryOrder(data: InsertDeliveryOrder): Promise<DeliveryOrder>;
+  updateDeliveryOrder(id: string, data: Partial<InsertDeliveryOrder>): Promise<DeliveryOrder | undefined>;
+  updateDeliveryOrderStatus(id: string, status: string): Promise<DeliveryOrder | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -430,6 +436,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteCategory(id: string): Promise<void> {
+    // Check for menu items referencing this category
+    const items = await db.select({ id: menuItems.id }).from(menuItems).where(eq(menuItems.categoryId, id));
+    if (items.length > 0) {
+      throw new Error("لا يمكن حذف التصنيف لوجود أصناف مرتبطة به - Cannot delete category with menu items");
+    }
     await db.delete(categories).where(eq(categories.id, id));
   }
 
@@ -470,6 +481,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteKitchenSection(id: string): Promise<void> {
+    // Unlink menu items from this kitchen section before deleting
+    await db.update(menuItems).set({ kitchenSectionId: null }).where(eq(menuItems.kitchenSectionId, id));
     await db.delete(kitchenSections).where(eq(kitchenSections.id, id));
   }
 
@@ -497,6 +510,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteMenuItem(id: string): Promise<void> {
+    // Cascade: delete variants, customization links, recipes, then the item
+    await db.delete(menuItemVariants).where(eq(menuItemVariants.menuItemId, id));
+    await db.delete(menuItemCustomizations).where(eq(menuItemCustomizations.menuItemId, id));
+    await db.delete(recipes).where(eq(recipes.menuItemId, id));
     await db.delete(menuItems).where(eq(menuItems.id, id));
   }
 
@@ -543,8 +560,12 @@ export class DatabaseStorage implements IStorage {
   // Orders
   async getOrders(restaurantId: string, branchId?: string): Promise<Order[]> {
     if (branchId) {
+      // Include orders for this specific branch AND orders with no branch (from general QR)
       return db.select().from(orders)
-        .where(sql`${orders.restaurantId} = ${restaurantId} AND (${orders.branchId} = ${branchId} OR ${orders.branchId} IS NULL)`)
+        .where(and(
+          eq(orders.restaurantId, restaurantId),
+          or(eq(orders.branchId, branchId), isNull(orders.branchId))
+        ))
         .orderBy(desc(orders.createdAt));
     }
     return db.select().from(orders)
@@ -566,21 +587,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createOrder(data: InsertOrder): Promise<Order> {
-    // Generate server-side unique order number (atomic counter)
+    // Generate server-side unique order number using atomic DB operation
     const today = new Date();
     const datePrefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
     
-    // Count existing orders for this restaurant today to get sequence number
-    const [countResult] = await db.select({ count: sql<number>`count(*)` })
-      .from(orders)
-      .where(sql`${orders.restaurantId} = ${data.restaurantId} AND ${orders.createdAt}::date = CURRENT_DATE`);
-    
-    const seq = (Number(countResult?.count) || 0) + 1;
-    const orderNumber = `ORD-${datePrefix}-${String(seq).padStart(4, '0')}`;
-    
+    // Use INSERT ... RETURNING with subquery for atomic sequence - prevents race conditions
+    const orderNumberPrefix = `ORD-${datePrefix}-`;
     const [order] = await db.insert(orders).values({
       ...data,
-      orderNumber,
+      orderNumber: sql`${orderNumberPrefix} || LPAD(
+        (COALESCE(
+          (SELECT MAX(SUBSTRING(${orders.orderNumber} FROM LENGTH(${orderNumberPrefix}) + 1)::int) 
+           FROM ${orders} 
+           WHERE ${orders.restaurantId} = ${data.restaurantId} 
+           AND ${orders.orderNumber} LIKE ${orderNumberPrefix + '%'}
+          ), 0
+        ) + 1)::text, 4, '0')`,
     }).returning();
     return order;
   }
@@ -602,6 +624,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteOrder(id: string): Promise<void> {
+    // Cascade: delete order item customizations, then order items, then the order
+    const items = await db.select({ id: orderItems.id }).from(orderItems).where(eq(orderItems.orderId, id));
+    for (const item of items) {
+      await db.delete(orderItemCustomizations).where(eq(orderItemCustomizations.orderItemId, item.id));
+    }
+    await db.delete(orderItems).where(eq(orderItems.orderId, id));
+    await db.delete(orderAuditLog).where(eq(orderAuditLog.orderId, id));
     await db.delete(orders).where(eq(orders.id, id));
   }
 
@@ -632,8 +661,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getInvoiceByOrder(orderId: string): Promise<Invoice | undefined> {
-    const [invoice] = await db.select().from(invoices).where(eq(invoices.orderId, orderId));
-    return invoice;
+    // Return the original invoice (not credit/debit notes) first
+    const rows = await db.select().from(invoices).where(eq(invoices.orderId, orderId));
+    // Prefer the original (simplified/standard) invoice
+    const original = rows.find(r => r.invoiceType !== 'credit_note' && r.invoiceType !== 'debit_note');
+    return original || rows[0];
+  }
+
+  async getCreditNoteForInvoice(originalInvoiceId: string): Promise<Invoice | undefined> {
+    const [note] = await db.select().from(invoices)
+      .where(and(eq(invoices.relatedInvoiceId, originalInvoiceId), eq(invoices.invoiceType, 'credit_note')));
+    return note;
   }
 
   async createInvoice(data: InsertInvoice): Promise<Invoice> {
@@ -649,18 +687,57 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  async getNextInvoiceNumber(restaurantId: string): Promise<string> {
-    // Use MAX to find the highest invoice number and increment, avoiding race conditions
-    const year = new Date().getFullYear();
-    const prefix = `INV-${year}-`;
-    const result = await db.select({ 
-      maxNum: sql<string>`MAX(CASE WHEN ${invoices.invoiceNumber} LIKE ${prefix + '%'} THEN SUBSTRING(${invoices.invoiceNumber} FROM ${prefix.length + 1})::int ELSE 0 END)` 
-    })
-      .from(invoices)
-      .where(eq(invoices.restaurantId, restaurantId));
-    const maxNum = Number(result[0]?.maxNum) || 0;
+  async getNextInvoiceNumber(restaurantId: string, branchId?: string | null): Promise<string> {
+    // Simple sequential: INV-NNNNNN per restaurant
+    const prefix = 'INV-';
+    // Extract the trailing numeric portion from any INV-* format (handles INV-000001, INV-branch-0001, etc.)
+    // Uses SUBSTRING with regex to get trailing digits only — avoids CAST failures on formats like "2-0001"
+    const result = await db.execute(
+      sql`SELECT COALESCE(MAX(
+            CAST(SUBSTRING(invoice_number FROM '[0-9]+$') AS integer)
+          ), 0) as max_num 
+          FROM invoices 
+          WHERE restaurant_id = ${restaurantId}
+          AND invoice_number LIKE 'INV-%'
+          AND invoice_number ~ '[0-9]+$'`
+    );
+    const maxNum = Number((result as any).rows?.[0]?.max_num ?? (result as any)[0]?.max_num ?? 0);
     const nextNumber = maxNum + 1;
     return `${prefix}${nextNumber.toString().padStart(6, '0')}`;
+  }
+
+  // Get ZATCA counter and hash for a branch (falls back to restaurant if no branch)
+  async getZatcaCounterAndHash(restaurantId: string, branchId?: string | null): Promise<{ counter: number; lastHash: string }> {
+    const defaultHash = 'NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYmVlYTI3OWI5MDRhNjId';
+    if (branchId) {
+      const branch = await this.getBranch(branchId);
+      if (branch) {
+        return {
+          counter: (branch as any).zatcaInvoiceCounter || 0,
+          lastHash: (branch as any).zatcaLastInvoiceHash || defaultHash,
+        };
+      }
+    }
+    // Fallback to restaurant level
+    const restaurant = await this.getRestaurantById(restaurantId);
+    return {
+      counter: (restaurant as any)?.zatcaInvoiceCounter || 0,
+      lastHash: (restaurant as any)?.zatcaLastInvoiceHash || defaultHash,
+    };
+  }
+
+  // Update ZATCA counter and hash for a branch (or restaurant if no branch)
+  async updateZatcaCounterAndHash(restaurantId: string, branchId: string | null | undefined, counter: number, hash: string): Promise<void> {
+    if (branchId) {
+      await db.update(branches)
+        .set({ zatcaInvoiceCounter: counter, zatcaLastInvoiceHash: hash } as any)
+        .where(eq(branches.id, branchId));
+    }
+    // Always update restaurant level too (for backward compatibility)
+    await this.updateRestaurantById(restaurantId, {
+      zatcaInvoiceCounter: counter,
+      zatcaLastInvoiceHash: hash,
+    } as any);
   }
 
   // Branches
@@ -720,6 +797,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteBranch(id: string): Promise<void> {
+    // Cascade: clean up branch-specific data
+    await db.delete(tables).where(eq(tables.branchId, id));
+    await db.delete(reservations).where(eq(reservations.branchId, id));
+    await db.delete(printers).where(eq(printers.branchId, id));
+    await db.delete(queueCounters).where(eq(queueCounters.branchId, id));
     await db.delete(branches).where(eq(branches.id, id));
   }
 
@@ -1087,7 +1169,8 @@ export class DatabaseStorage implements IStorage {
 
   // User Authentication
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const [user] = await db.select().from(users).where(eq(users.email, email));
+    const normalizedEmail = email.toLowerCase().trim();
+    const [user] = await db.select().from(users).where(sql`LOWER(${users.email}) = ${normalizedEmail}`);
     return user;
   }
 
@@ -1108,75 +1191,6 @@ export class DatabaseStorage implements IStorage {
   async getOrdersByRestaurant(restaurantId: string): Promise<Order[]> {
     return await db.select().from(orders).where(eq(orders.restaurantId, restaurantId)).orderBy(desc(orders.createdAt));
   }
-  
-  // Moyasar Merchants
-  async getMoyasarMerchant(restaurantId: string): Promise<MoyasarMerchant | undefined> {
-    const [merchant] = await db.select().from(moyasarMerchants).where(eq(moyasarMerchants.restaurantId, restaurantId));
-    return merchant;
-  }
-
-  async getMoyasarMerchantById(id: string): Promise<MoyasarMerchant | undefined> {
-    const [merchant] = await db.select().from(moyasarMerchants).where(eq(moyasarMerchants.id, id));
-    return merchant;
-  }
-
-  async getMoyasarMerchantByMoyasarId(moyasarId: string): Promise<MoyasarMerchant | undefined> {
-    const [merchant] = await db.select().from(moyasarMerchants).where(eq(moyasarMerchants.moyasarMerchantId, moyasarId));
-    return merchant;
-  }
-
-  async createMoyasarMerchant(data: InsertMoyasarMerchant): Promise<MoyasarMerchant> {
-    const [merchant] = await db.insert(moyasarMerchants).values(data as any).returning();
-    return merchant;
-  }
-
-  async updateMoyasarMerchant(id: string, data: Partial<InsertMoyasarMerchant>): Promise<MoyasarMerchant | undefined> {
-    const [updated] = await db.update(moyasarMerchants)
-      .set({ ...data, updatedAt: new Date() } as any)
-      .where(eq(moyasarMerchants.id, id))
-      .returning();
-    return updated;
-  }
-
-  async deleteMoyasarMerchant(id: string): Promise<void> {
-    // First delete associated documents
-    await db.delete(moyasarDocuments).where(eq(moyasarDocuments.merchantId, id));
-    await db.delete(moyasarMerchants).where(eq(moyasarMerchants.id, id));
-  }
-
-  // Moyasar Documents
-  async getMoyasarDocuments(merchantId: string): Promise<MoyasarDocument[]> {
-    return db.select().from(moyasarDocuments).where(eq(moyasarDocuments.merchantId, merchantId));
-  }
-
-  async getMoyasarDocument(id: string): Promise<MoyasarDocument | undefined> {
-    const [doc] = await db.select().from(moyasarDocuments).where(eq(moyasarDocuments.id, id));
-    return doc;
-  }
-
-  async getMoyasarDocumentByType(merchantId: string, documentType: string): Promise<MoyasarDocument | undefined> {
-    const [doc] = await db.select().from(moyasarDocuments).where(
-      and(eq(moyasarDocuments.merchantId, merchantId), eq(moyasarDocuments.documentType, documentType))
-    );
-    return doc;
-  }
-
-  async createMoyasarDocument(data: InsertMoyasarDocument): Promise<MoyasarDocument> {
-    const [doc] = await db.insert(moyasarDocuments).values(data as any).returning();
-    return doc;
-  }
-
-  async updateMoyasarDocument(id: string, data: Partial<InsertMoyasarDocument>): Promise<MoyasarDocument | undefined> {
-    const [updated] = await db.update(moyasarDocuments)
-      .set({ ...data, updatedAt: new Date() } as any)
-      .where(eq(moyasarDocuments.id, id))
-      .returning();
-    return updated;
-  }
-
-  async deleteMoyasarDocument(id: string): Promise<void> {
-    await db.delete(moyasarDocuments).where(eq(moyasarDocuments.id, id));
-  }
 
   // Payment Transactions
   async getPaymentTransactions(restaurantId: string, orderId?: string): Promise<PaymentTransaction[]> {
@@ -1189,11 +1203,6 @@ export class DatabaseStorage implements IStorage {
 
   async getPaymentTransaction(id: string): Promise<PaymentTransaction | undefined> {
     const [tx] = await db.select().from(paymentTransactions).where(eq(paymentTransactions.id, id));
-    return tx;
-  }
-
-  async getPaymentTransactionByMoyasarId(moyasarPaymentId: string): Promise<PaymentTransaction | undefined> {
-    const [tx] = await db.select().from(paymentTransactions).where(eq(paymentTransactions.moyasarPaymentId, moyasarPaymentId));
     return tx;
   }
 
@@ -1210,54 +1219,54 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  // Moyasar Invoices
-  async getMoyasarInvoices(restaurantId: string): Promise<MoyasarInvoice[]> {
-    return db.select().from(moyasarInvoices).where(eq(moyasarInvoices.restaurantId, restaurantId)).orderBy(desc(moyasarInvoices.createdAt));
+  // ===============================
+  // EDFAPAY MERCHANTS
+  // ===============================
+  async getEdfapayMerchant(restaurantId: string): Promise<EdfapayMerchant | undefined> {
+    const [merchant] = await db.select().from(edfapayMerchants).where(eq(edfapayMerchants.restaurantId, restaurantId));
+    return merchant;
   }
 
-  async getMoyasarInvoice(id: string): Promise<MoyasarInvoice | undefined> {
-    const [inv] = await db.select().from(moyasarInvoices).where(eq(moyasarInvoices.id, id));
-    return inv;
+  async createEdfapayMerchant(data: InsertEdfapayMerchant): Promise<EdfapayMerchant> {
+    const [merchant] = await db.insert(edfapayMerchants).values(data as any).returning();
+    return merchant;
   }
 
-  async getMoyasarInvoiceByMoyasarId(moyasarInvoiceId: string): Promise<MoyasarInvoice | undefined> {
-    const [inv] = await db.select().from(moyasarInvoices).where(eq(moyasarInvoices.moyasarInvoiceId, moyasarInvoiceId));
-    return inv;
-  }
-
-  async createMoyasarInvoice(data: InsertMoyasarInvoice): Promise<MoyasarInvoice> {
-    const [inv] = await db.insert(moyasarInvoices).values(data as any).returning();
-    return inv;
-  }
-
-  async updateMoyasarInvoice(id: string, data: Partial<InsertMoyasarInvoice>): Promise<MoyasarInvoice | undefined> {
-    const [updated] = await db.update(moyasarInvoices)
-      .set({ ...data, updatedAt: new Date() } as any)
-      .where(eq(moyasarInvoices.id, id))
+  async updateEdfapayMerchant(id: string, data: Partial<InsertEdfapayMerchant>): Promise<EdfapayMerchant | undefined> {
+    const [updated] = await db.update(edfapayMerchants)
+      .set({ ...data as any, updatedAt: new Date() })
+      .where(eq(edfapayMerchants.id, id))
       .returning();
     return updated;
   }
 
-  // Apple Pay Domains
-  async getApplePayDomains(restaurantId: string): Promise<ApplePayDomain[]> {
-    return db.select().from(applePayDomains).where(eq(applePayDomains.restaurantId, restaurantId));
+  // ===============================
+  // EDFAPAY INVOICES
+  // ===============================
+  async getEdfapayInvoices(restaurantId: string): Promise<EdfapayInvoice[]> {
+    return db.select().from(edfapayInvoices)
+      .where(eq(edfapayInvoices.restaurantId, restaurantId))
+      .orderBy(desc(edfapayInvoices.createdAt));
   }
 
-  async createApplePayDomain(data: InsertApplePayDomain): Promise<ApplePayDomain> {
-    const [domain] = await db.insert(applePayDomains).values(data as any).returning();
-    return domain;
+  async createEdfapayInvoice(data: InsertEdfapayInvoice): Promise<EdfapayInvoice> {
+    const [invoice] = await db.insert(edfapayInvoices).values(data as any).returning();
+    return invoice;
   }
 
-  async updateApplePayDomain(id: string, data: Partial<InsertApplePayDomain>): Promise<ApplePayDomain | undefined> {
-    const [updated] = await db.update(applePayDomains)
-      .set(data as any)
-      .where(eq(applePayDomains.id, id))
+  async updateEdfapayInvoice(id: string, data: Partial<InsertEdfapayInvoice>): Promise<EdfapayInvoice | undefined> {
+    const [updated] = await db.update(edfapayInvoices)
+      .set({ ...data as any, updatedAt: new Date() })
+      .where(eq(edfapayInvoices.id, id))
       .returning();
     return updated;
   }
 
-  async deleteApplePayDomain(id: string): Promise<void> {
-    await db.delete(applePayDomains).where(eq(applePayDomains.id, id));
+  // Payment transaction by EdfaPay ID
+  async getPaymentTransactionByEdfapayId(edfapayTransactionId: string): Promise<PaymentTransaction | undefined> {
+    const [tx] = await db.select().from(paymentTransactions)
+      .where(eq(paymentTransactions.edfapayTransactionId, edfapayTransactionId));
+    return tx;
   }
 
   // ===============================
@@ -1543,6 +1552,12 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async updateReviewVisibility(id: string, restaurantId: string, isPublic: boolean): Promise<void> {
+    await db.update(reviews)
+      .set({ isPublic })
+      .where(and(eq(reviews.id, id), eq(reviews.restaurantId, restaurantId)));
+  }
+
   // ===============================
   // 3. MENU VARIANTS & CUSTOMIZATIONS - المتغيرات والتخصيصات
   // ===============================
@@ -1772,28 +1787,19 @@ export class DatabaseStorage implements IStorage {
   async getCurrentDaySession(restaurantId: string, branchId?: string): Promise<DaySession | undefined> {
     const today = new Date().toISOString().split('T')[0];
     
-    // First: try to find a session matching the exact branch
+    const conditions = [
+      eq(daySessions.restaurantId, restaurantId),
+      eq(daySessions.date, today),
+      eq(daySessions.status, "open"),
+    ];
+    
+    // Strict branch filter — no cross-branch fallback
     if (branchId) {
-      const [branchSession] = await db.select().from(daySessions).where(
-        and(
-          eq(daySessions.restaurantId, restaurantId),
-          eq(daySessions.date, today),
-          eq(daySessions.status, "open"),
-          eq(daySessions.branchId, branchId),
-        )
-      );
-      if (branchSession) return branchSession;
+      conditions.push(eq(daySessions.branchId, branchId));
     }
     
-    // Fallback: find any open session for this restaurant today (branch-agnostic)
-    const [anySession] = await db.select().from(daySessions).where(
-      and(
-        eq(daySessions.restaurantId, restaurantId),
-        eq(daySessions.date, today),
-        eq(daySessions.status, "open"),
-      )
-    );
-    return anySession;
+    const [session] = await db.select().from(daySessions).where(and(...conditions));
+    return session;
   }
 
   async getDaySession(id: string): Promise<DaySession | undefined> {
@@ -1872,7 +1878,8 @@ export class DatabaseStorage implements IStorage {
   async getNotifications(restaurantId: string, branchId?: string, unreadOnly?: boolean): Promise<Notification[]> {
     let conditions: any[] = [eq(notifications.restaurantId, restaurantId)];
     if (branchId) {
-      conditions.push(eq(notifications.branchId, branchId));
+      // Include both branch-specific notifications AND restaurant-wide notifications (branchId is NULL)
+      conditions.push(or(eq(notifications.branchId, branchId), isNull(notifications.branchId)));
     }
     if (unreadOnly) {
       conditions.push(eq(notifications.isRead, false));
@@ -1901,7 +1908,8 @@ export class DatabaseStorage implements IStorage {
   async markAllNotificationsAsRead(restaurantId: string, branchId?: string): Promise<void> {
     let conditions: any[] = [eq(notifications.restaurantId, restaurantId), eq(notifications.isRead, false)];
     if (branchId) {
-      conditions.push(eq(notifications.branchId, branchId));
+      // Include both branch-specific and restaurant-wide notifications (branchId is NULL)
+      conditions.push(or(eq(notifications.branchId, branchId), isNull(notifications.branchId)));
     }
     await db.update(notifications)
       .set({ isRead: true, readAt: new Date() } as any)
@@ -1955,6 +1963,214 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(orderAuditLog)
       .where(eq(orderAuditLog.orderId, orderId))
       .orderBy(orderAuditLog.createdAt);
+  }
+
+  // Invoice Audit Log - سجل عمليات الفواتير
+  async createInvoiceAuditLog(data: InsertInvoiceAuditLog): Promise<InvoiceAuditLog> {
+    const [log] = await db.insert(invoiceAuditLog).values(data).returning();
+    return log;
+  }
+
+  async getInvoiceAuditLogs(restaurantId: string, limit?: number): Promise<InvoiceAuditLog[]> {
+    const query = db.select().from(invoiceAuditLog)
+      .where(eq(invoiceAuditLog.restaurantId, restaurantId))
+      .orderBy(desc(invoiceAuditLog.createdAt));
+    if (limit) {
+      return query.limit(limit);
+    }
+    return query;
+  }
+
+  async getInvoiceAuditLogsByInvoice(invoiceId: string): Promise<InvoiceAuditLog[]> {
+    return db.select().from(invoiceAuditLog)
+      .where(eq(invoiceAuditLog.invoiceId, invoiceId))
+      .orderBy(desc(invoiceAuditLog.createdAt));
+  }
+
+  // Invoice search/archive with filters
+  async searchInvoices(restaurantId: string, filters: {
+    invoiceNumber?: string;
+    customerPhone?: string;
+    startDate?: Date;
+    endDate?: Date;
+    paymentMethod?: string;
+    status?: string;
+    invoiceType?: string;
+  }): Promise<Invoice[]> {
+    const conditions = [eq(invoices.restaurantId, restaurantId)];
+    
+    if (filters.invoiceNumber) {
+      conditions.push(sql`${invoices.invoiceNumber} ILIKE ${'%' + filters.invoiceNumber + '%'}`);
+    }
+    if (filters.customerPhone) {
+      conditions.push(sql`${invoices.customerPhone} ILIKE ${'%' + filters.customerPhone + '%'}`);
+    }
+    if (filters.startDate) {
+      conditions.push(gte(invoices.createdAt, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(invoices.createdAt, filters.endDate));
+    }
+    if (filters.paymentMethod) {
+      conditions.push(eq(invoices.paymentMethod, filters.paymentMethod));
+    }
+    if (filters.status) {
+      conditions.push(eq(invoices.status, filters.status));
+    }
+    if (filters.invoiceType) {
+      conditions.push(eq(invoices.invoiceType, filters.invoiceType));
+    }
+    
+    return db.select().from(invoices)
+      .where(and(...conditions))
+      .orderBy(desc(invoices.createdAt));
+  }
+
+  // Tax reports
+  async getTaxReport(restaurantId: string, startDate: Date, endDate: Date, branchId?: string): Promise<any> {
+    // Get all invoices in date range
+    const conditions = [
+      eq(invoices.restaurantId, restaurantId),
+      gte(invoices.createdAt, startDate),
+      lte(invoices.createdAt, endDate),
+    ];
+    
+    const allInvoices = await db.select().from(invoices).where(and(...conditions));
+    
+    const issued = allInvoices.filter(i => i.status === 'issued' && i.invoiceType !== 'credit_note' && i.invoiceType !== 'debit_note');
+    const creditNotes = allInvoices.filter(i => i.invoiceType === 'credit_note');
+    const debitNotes = allInvoices.filter(i => i.invoiceType === 'debit_note');
+    const cancelled = allInvoices.filter(i => i.status === 'cancelled');
+    
+    const sum = (items: typeof allInvoices, field: 'subtotal' | 'taxAmount' | 'total') => 
+      items.reduce((acc, i) => acc + parseFloat(String(i[field]) || '0'), 0);
+    
+    return {
+      period: { startDate, endDate },
+      sales: {
+        count: issued.length,
+        subtotal: sum(issued, 'subtotal'),
+        taxAmount: sum(issued, 'taxAmount'),
+        total: sum(issued, 'total'),
+      },
+      creditNotes: {
+        count: creditNotes.length,
+        subtotal: sum(creditNotes, 'subtotal'),
+        taxAmount: sum(creditNotes, 'taxAmount'),
+        total: sum(creditNotes, 'total'),
+      },
+      debitNotes: {
+        count: debitNotes.length,
+        subtotal: sum(debitNotes, 'subtotal'),
+        taxAmount: sum(debitNotes, 'taxAmount'),
+        total: sum(debitNotes, 'total'),
+      },
+      cancelled: {
+        count: cancelled.length,
+      },
+      netTax: sum(issued, 'taxAmount') - sum(creditNotes, 'taxAmount') + sum(debitNotes, 'taxAmount'),
+      netSales: sum(issued, 'total') - sum(creditNotes, 'total') + sum(debitNotes, 'total'),
+    };
+  }
+
+  // ===============================
+  // DELIVERY INTEGRATIONS
+  // ===============================
+  async getDeliveryIntegrations(restaurantId: string, branchId?: string): Promise<DeliveryIntegration[]> {
+    const conditions = [eq(deliveryIntegrations.restaurantId, restaurantId)];
+    if (branchId) {
+      conditions.push(eq(deliveryIntegrations.branchId, branchId));
+    }
+    return db.select().from(deliveryIntegrations)
+      .where(and(...conditions))
+      .orderBy(desc(deliveryIntegrations.createdAt));
+  }
+
+  async getDeliveryIntegration(id: string): Promise<DeliveryIntegration | undefined> {
+    const [integration] = await db.select().from(deliveryIntegrations)
+      .where(eq(deliveryIntegrations.id, id)).limit(1);
+    return integration;
+  }
+
+  async getDeliveryIntegrationByVendor(platform: string, vendorId: string): Promise<DeliveryIntegration | undefined> {
+    const [integration] = await db.select().from(deliveryIntegrations)
+      .where(and(
+        eq(deliveryIntegrations.platform, platform),
+        eq(deliveryIntegrations.vendorId, vendorId)
+      )).limit(1);
+    return integration;
+  }
+
+  async createDeliveryIntegration(data: InsertDeliveryIntegration): Promise<DeliveryIntegration> {
+    const [integration] = await db.insert(deliveryIntegrations).values(data).returning();
+    return integration;
+  }
+
+  async updateDeliveryIntegration(id: string, data: Partial<InsertDeliveryIntegration>): Promise<DeliveryIntegration | undefined> {
+    const [updated] = await db.update(deliveryIntegrations)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(deliveryIntegrations.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteDeliveryIntegration(id: string): Promise<void> {
+    await db.delete(deliveryIntegrations).where(eq(deliveryIntegrations.id, id));
+  }
+
+  // Delivery Orders
+  async getDeliveryOrders(restaurantId: string, branchId?: string): Promise<DeliveryOrder[]> {
+    const conditions = [eq(deliveryOrders.restaurantId, restaurantId)];
+    if (branchId) {
+      conditions.push(eq(deliveryOrders.branchId, branchId));
+    }
+    return db.select().from(deliveryOrders)
+      .where(and(...conditions))
+      .orderBy(desc(deliveryOrders.createdAt));
+  }
+
+  async getDeliveryOrder(id: string): Promise<DeliveryOrder | undefined> {
+    const [order] = await db.select().from(deliveryOrders)
+      .where(eq(deliveryOrders.id, id)).limit(1);
+    return order;
+  }
+
+  async getDeliveryOrderByExternalId(platform: string, externalOrderId: string): Promise<DeliveryOrder | undefined> {
+    const [order] = await db.select().from(deliveryOrders)
+      .where(and(
+        eq(deliveryOrders.platform, platform),
+        eq(deliveryOrders.externalOrderId, externalOrderId)
+      )).limit(1);
+    return order;
+  }
+
+  async createDeliveryOrder(data: InsertDeliveryOrder): Promise<DeliveryOrder> {
+    const [order] = await db.insert(deliveryOrders).values(data).returning();
+    return order;
+  }
+
+  async updateDeliveryOrder(id: string, data: Partial<InsertDeliveryOrder>): Promise<DeliveryOrder | undefined> {
+    const [updated] = await db.update(deliveryOrders)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(deliveryOrders.id, id))
+      .returning();
+    return updated;
+  }
+
+  async updateDeliveryOrderStatus(id: string, status: string): Promise<DeliveryOrder | undefined> {
+    const now = new Date();
+    const statusTimestamps: Record<string, any> = {};
+    if (status === 'accepted') statusTimestamps.acceptedAt = now;
+    if (status === 'ready') statusTimestamps.readyAt = now;
+    if (status === 'picked_up') statusTimestamps.pickedUpAt = now;
+    if (status === 'delivered') statusTimestamps.deliveredAt = now;
+    if (status === 'cancelled' || status === 'rejected') statusTimestamps.cancelledAt = now;
+
+    const [updated] = await db.update(deliveryOrders)
+      .set({ platformStatus: status, ...statusTimestamps, updatedAt: now })
+      .where(eq(deliveryOrders.id, id))
+      .returning();
+    return updated;
   }
 }
 

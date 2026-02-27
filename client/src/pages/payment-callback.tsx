@@ -76,17 +76,23 @@ export default function PaymentCallbackPage() {
       completed = true;
       try {
         const urlParams = new URLSearchParams(window.location.search);
-        const paymentId = urlParams.get("id");
+        
+        // EdfaPay callback params
+        const transId = urlParams.get("trans_id") || urlParams.get("order_id");
         const paymentStatus = urlParams.get("status");
+        const gwayId = urlParams.get("trans_id");
 
-        if (!paymentId) {
+        // Also support legacy ?id= param or ?status=paid for direct redirects
+        const legacyId = urlParams.get("id");
+
+        if (!transId && !legacyId && paymentStatus !== "paid") {
           setStatus("failed");
           setMessage(language === "ar" ? "معرّف الدفع غير موجود" : "Payment ID not found");
           return;
         }
 
-        // Check if Moyasar reported a failed payment
-        if (paymentStatus === "failed") {
+        // Check if EdfaPay reported a failed/declined payment
+        if (paymentStatus === "fail" || paymentStatus === "failed" || paymentStatus === "declined") {
           setStatus("failed");
           setMessage(language === "ar" ? "لم يتم إكمال الدفع" : "Payment was not completed");
           return;
@@ -94,7 +100,8 @@ export default function PaymentCallbackPage() {
 
         const completeRes = await apiRequest("POST", "/api/payments/complete", {
           orderId,
-          paymentId,
+          transId: transId || legacyId,
+          gwayId: gwayId || transId || legacyId,
         });
 
         if (completeRes.ok) {
@@ -348,6 +355,12 @@ export default function PaymentCallbackPage() {
                         <span className="text-gray-600">{language === "ar" ? "رقم الفاتورة" : "Invoice #"}:</span>
                         <span className="font-medium">{invoice.invoiceNumber}</span>
                       </div>
+                      {invoice.invoiceCounter && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">{language === "ar" ? "عداد الفاتورة (ICV)" : "Invoice Counter (ICV)"}:</span>
+                          <span className="font-medium">{invoice.invoiceCounter}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between">
                         <span className="text-gray-600">{language === "ar" ? "رقم الطلب" : "Order #"}:</span>
                         <span className="font-medium">{invoice.order?.orderNumber || "-"}</span>
@@ -365,7 +378,7 @@ export default function PaymentCallbackPage() {
                       {invoice.paymentMethod && (
                         <div className="flex justify-between">
                           <span className="text-gray-600">{language === "ar" ? "طريقة الدفع" : "Payment"}:</span>
-                          <span>{invoice.paymentMethod === "moyasar_online" ? (language === "ar" ? "دفع إلكتروني" : "Online") : invoice.paymentMethod}</span>
+                          <span>{invoice.paymentMethod === "edfapay_online" ? (language === "ar" ? "دفع إلكتروني" : "Online") : invoice.paymentMethod}</span>
                         </div>
                       )}
                     </div>

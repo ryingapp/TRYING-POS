@@ -39,6 +39,7 @@ export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
+  retries = 3,
 ): Promise<Response> {
   const authHeaders = getAuthHeaders();
   const res = await fetch(url, {
@@ -51,6 +52,13 @@ export async function apiRequest(
     credentials: "include",
   });
 
+  // Handle rate limiting with exponential backoff
+  if (res.status === 429 && retries > 0) {
+    const delay = Math.pow(2, 3 - retries) * 1000; // 1s, 2s, 4s
+    await new Promise(resolve => setTimeout(resolve, delay));
+    return apiRequest(method, url, data, retries - 1);
+  }
+
   await throwIfResNotOk(res);
   return res;
 }
@@ -62,10 +70,24 @@ export const getQueryFn: <T>(options: {
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
     const authHeaders = getAuthHeaders();
-    const res = await fetch(queryKey.join("/") as string, {
-      credentials: "include",
-      headers: authHeaders,
-    });
+    
+    const fetchWithRetry = async (retries = 3): Promise<Response> => {
+      const res = await fetch(queryKey.join("/") as string, {
+        credentials: "include",
+        headers: authHeaders,
+      });
+      
+      // Handle rate limiting with exponential backoff
+      if (res.status === 429 && retries > 0) {
+        const delay = Math.pow(2, 3 - retries) * 1000; // 1s, 2s, 4s
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return fetchWithRetry(retries - 1);
+      }
+      
+      return res;
+    };
+    
+    const res = await fetchWithRetry();
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Eye, EyeOff, LogIn, Sun, Moon, Globe, Loader2 } from "lucide-react";
-import logoImg from "@assets/logo.jpg";
+
 
 export default function LoginPage() {
   const { login, isLoading } = useAuth();
@@ -81,7 +81,7 @@ export default function LoginPage() {
 
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
-          <img src={logoImg} alt="Trying" className="w-48 h-auto mx-auto mb-2 object-contain" data-testid="img-logo" />
+          <div className="w-48 h-20 mx-auto mb-2 flex items-center justify-center"><div className="w-16 h-16 rounded-xl bg-primary flex items-center justify-center text-primary-foreground font-bold text-3xl">T</div></div>
         </div>
 
         <Card>

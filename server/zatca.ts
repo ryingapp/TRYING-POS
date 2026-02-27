@@ -1,8 +1,21 @@
 /**
- * ZATCA E-Invoice XML Generator (UBL 2.1)
- * Generates ZATCA-compliant XML for Saudi Arabia e-invoicing
- * Supports: Simplified Tax Invoice (B2C), Standard Tax Invoice (B2B)
- * References: ZATCA E-Invoice Phase 2 Technical Requirements
+ * ZATCA E-Invoice Generator — Phase 2 Full Compliance
+ * 
+ * Implements:
+ * - UBL 2.1 XML generation (simplified B2C + standard B2B)
+ * - ECDSA secp256k1 CSR generation with ZATCA-specific OID extensions
+ * - XAdES-BES enveloped digital signatures (ds:Signature)
+ * - SHA-256 hash chain (ICV + PIH)
+ * - Phase 2 QR TLV encoding (9 tags incl. signature, pubkey, CSID)
+ * - ZATCA API client (compliance CSID, production CSID, reporting, clearance)
+ * - Banker's rounding (ZATCA-mandated)
+ * - Tax exemption reason codes (BR-KSA-73, BR-O-02)
+ * 
+ * References:
+ * - ZATCA E-Invoice Phase 2 Technical Requirements v3.3.3
+ * - UBL 2.1 OASIS Standard
+ * - XAdES-BES (ETSI EN 319 132-1)
+ * - ZATCA Developer Portal Manual v3
  */
 import crypto from 'crypto';
 
@@ -57,6 +70,8 @@ export interface ZatcaInvoiceData {
   // Related invoice (for credit/debit notes)
   relatedInvoiceNumber?: string;
   relatedInvoiceIssueDate?: string;
+  // Credit/debit note reason (KSA-10, BR-KSA-17)
+  noteReason?: string;
 }
 
 export interface ZatcaLineItem {
@@ -70,6 +85,9 @@ export interface ZatcaLineItem {
   taxAmount: number;
   totalWithTax: number;
   totalWithoutTax: number;
+  // Tax exemption (BR-KSA-73, BR-O-02)
+  taxExemptionReasonCode?: string;
+  taxExemptionReason?: string;
 }
 
 // ===========================================
@@ -78,8 +96,8 @@ export interface ZatcaLineItem {
 const INVOICE_TYPE_CODES: Record<string, string> = {
   'simplified': '0200000', // Simplified Tax Invoice (B2C)
   'standard': '0100000',   // Standard Tax Invoice (B2B)
-  'credit_note': '0200000', // Credit Note
-  'debit_note': '0200000',  // Debit Note
+  'credit_note': '0200000', // default simplified — overridden if buyer present
+  'debit_note': '0200000',  // default simplified — overridden if buyer present
 };
 
 const INVOICE_TYPE_NAME: Record<string, string> = {
@@ -89,7 +107,7 @@ const INVOICE_TYPE_NAME: Record<string, string> = {
   'debit_note': '383',  // Debit Note
 };
 
-// Payment method mapping to ZATCA codes
+// Payment method mapping to ZATCA codes (UN/ECE 4461)
 const PAYMENT_CODES: Record<string, string> = {
   'cash': '10',
   'card': '48',
@@ -98,19 +116,70 @@ const PAYMENT_CODES: Record<string, string> = {
   'apple_pay': '48',
   'bank_transfer': '42',
   'tap_to_pay': '48',
-  'split': '1', // Instrument not defined
+  'edfapay_online': '48',
+  'mobile_pay': '48',
+  'credit': '30',
+  'split': '1',
+};
+
+// Tax category codes per ZATCA
+const TAX_CATEGORIES = {
+  STANDARD: 'S',
+  ZERO_RATED: 'Z',
+  EXEMPT: 'E',
+  NOT_SUBJECT: 'O',
+};
+
+// Tax exemption reason codes (BR-KSA-73)
+const TAX_EXEMPTION_REASONS: Record<string, string> = {
+  'VATEX-SA-29': 'Financial services mentioned in Article 29 of the VAT Regulations',
+  'VATEX-SA-29-7': 'Life insurance services mentioned in Article 29 of the VAT Regulations',
+  'VATEX-SA-30': 'Real estate transactions mentioned in Article 30 of the VAT Regulations',
+  'VATEX-SA-32': 'Export of goods',
+  'VATEX-SA-33': 'Export of services',
+  'VATEX-SA-34-1': 'The international transport of Goods',
+  'VATEX-SA-34-2': 'International transport of passengers',
+  'VATEX-SA-34-3': 'Services directly connected and incidental to a Supply of international passenger transport',
+  'VATEX-SA-34-4': 'Supply of a qualifying means of transport',
+  'VATEX-SA-34-5': 'Any services relating to Goods or passenger transportation',
+  'VATEX-SA-35': 'Medicines and medical equipment',
+  'VATEX-SA-36': 'Qualifying metals',
+  'VATEX-SA-EDU': 'Private education to citizen',
+  'VATEX-SA-HEA': 'Private healthcare to citizen',
+  'VATEX-SA-MLTRY': 'Supply of qualified military goods',
+  'VATEX-SA-OOS': 'Reason is free text - not subject to tax',
 };
 
 // ===========================================
-// XML Generator
+// Banker's Rounding (ZATCA-mandated)
+// ===========================================
+export function bankersRound(value: number, decimals: number = 2): number {
+  const factor = Math.pow(10, decimals);
+  const shifted = value * factor;
+  const floored = Math.floor(shifted);
+  const diff = shifted - floored;
+
+  if (Math.abs(diff - 0.5) < 1e-10) {
+    return (floored % 2 === 0 ? floored : floored + 1) / factor;
+  }
+  return Math.round(shifted) / factor;
+}
+
+// ===========================================
+// XML Generator — UBL 2.1 Invoice
 // ===========================================
 export function generateZatcaXml(data: ZatcaInvoiceData): string {
   const invoiceTypeCode = INVOICE_TYPE_NAME[data.invoiceType] || '388';
-  const subTypeCode = INVOICE_TYPE_CODES[data.invoiceType] || '0200000';
+  // credit/debit notes: use standard prefix (0100000) when buyer info is present
+  const isNote = data.invoiceType === 'credit_note' || data.invoiceType === 'debit_note';
+  const subTypeCode = isNote && data.buyer?.vatNumber
+    ? '0100000'
+    : (INVOICE_TYPE_CODES[data.invoiceType] || '0200000');
   const paymentCode = PAYMENT_CODES[data.paymentMethod || 'cash'] || '10';
 
   const isCredit = data.invoiceType === 'credit_note';
   const isDebit = data.invoiceType === 'debit_note';
+  const taxCategoryId = data.taxRate > 0 ? TAX_CATEGORIES.STANDARD : TAX_CATEGORIES.ZERO_RATED;
 
   let xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
@@ -126,7 +195,13 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
   <cbc:DocumentCurrencyCode>SAR</cbc:DocumentCurrencyCode>
   <cbc:TaxCurrencyCode>SAR</cbc:TaxCurrencyCode>`;
 
-  // Billing reference (for credit/debit notes)
+  // Instruction note for credit/debit notes (KSA-10, BR-KSA-17)
+  if ((isCredit || isDebit) && data.noteReason) {
+    xml += `
+  <cbc:InstructionNote>${escapeXml(data.noteReason)}</cbc:InstructionNote>`;
+  }
+
+  // Billing reference for credit/debit notes (BR-KSA-56)
   if ((isCredit || isDebit) && data.relatedInvoiceNumber) {
     xml += `
   <cac:BillingReference>
@@ -137,14 +212,14 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
   </cac:BillingReference>`;
   }
 
-  // Additional Document Reference - Invoice Counter Value (ICV)
+  // ICV — Invoice Counter Value (KSA-16)
   xml += `
   <cac:AdditionalDocumentReference>
     <cbc:ID>ICV</cbc:ID>
     <cbc:UUID>${data.invoiceCounter}</cbc:UUID>
   </cac:AdditionalDocumentReference>`;
 
-  // Additional Document Reference - Previous Invoice Hash (PIH)
+  // PIH — Previous Invoice Hash (KSA-13)
   xml += `
   <cac:AdditionalDocumentReference>
     <cbc:ID>PIH</cbc:ID>
@@ -153,14 +228,23 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
     </cac:Attachment>
   </cac:AdditionalDocumentReference>`;
 
-  // Signature (placeholder - will be filled by signing process)
+  // QR placeholder (KSA-14, BR-KSA-27) — populated after hash + signing
+  xml += `
+  <cac:AdditionalDocumentReference>
+    <cbc:ID>QR</cbc:ID>
+    <cac:Attachment>
+      <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">__QR_PLACEHOLDER__</cbc:EmbeddedDocumentBinaryObject>
+    </cac:Attachment>
+  </cac:AdditionalDocumentReference>`;
+
+  // Signature reference (KSA-15) — enveloped XAdES-BES
   xml += `
   <cac:Signature>
     <cbc:ID>urn:oasis:names:specification:ubl:signature:Invoice</cbc:ID>
     <cbc:SignatureMethod>urn:oasis:names:specification:ubl:dsig:enveloped:xades</cbc:SignatureMethod>
   </cac:Signature>`;
 
-  // Supplier (Seller) Party
+  // ========== Supplier (Seller) Party ==========
   xml += `
   <cac:AccountingSupplierParty>
     <cac:Party>
@@ -189,7 +273,7 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
     </cac:Party>
   </cac:AccountingSupplierParty>`;
 
-  // Customer (Buyer) Party
+  // ========== Customer (Buyer) Party ==========
   xml += `
   <cac:AccountingCustomerParty>
     <cac:Party>`;
@@ -204,13 +288,13 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
   if (data.buyer?.streetName || data.buyer?.city) {
     xml += `
       <cac:PostalAddress>
-        <cbc:StreetName>${escapeXml(data.buyer.streetName || '')}</cbc:StreetName>
-        ${data.buyer.buildingNumber ? `<cbc:BuildingNumber>${escapeXml(data.buyer.buildingNumber)}</cbc:BuildingNumber>` : ''}
-        ${data.buyer.district ? `<cbc:CitySubdivisionName>${escapeXml(data.buyer.district)}</cbc:CitySubdivisionName>` : ''}
-        <cbc:CityName>${escapeXml(data.buyer.city || '')}</cbc:CityName>
-        ${data.buyer.postalCode ? `<cbc:PostalZone>${escapeXml(data.buyer.postalCode)}</cbc:PostalZone>` : ''}
+        <cbc:StreetName>${escapeXml(data.buyer?.streetName || '')}</cbc:StreetName>
+        ${data.buyer?.buildingNumber ? `<cbc:BuildingNumber>${escapeXml(data.buyer.buildingNumber)}</cbc:BuildingNumber>` : ''}
+        ${data.buyer?.district ? `<cbc:CitySubdivisionName>${escapeXml(data.buyer.district)}</cbc:CitySubdivisionName>` : ''}
+        <cbc:CityName>${escapeXml(data.buyer?.city || '')}</cbc:CityName>
+        ${data.buyer?.postalCode ? `<cbc:PostalZone>${escapeXml(data.buyer.postalCode)}</cbc:PostalZone>` : ''}
         <cac:Country>
-          <cbc:IdentificationCode>${escapeXml(data.buyer.country || 'SA')}</cbc:IdentificationCode>
+          <cbc:IdentificationCode>${escapeXml(data.buyer?.country || 'SA')}</cbc:IdentificationCode>
         </cac:Country>
       </cac:PostalAddress>`;
   }
@@ -236,7 +320,7 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
     </cac:Party>
   </cac:AccountingCustomerParty>`;
 
-  // Delivery date
+  // ========== Delivery ==========
   if (data.deliveryDate) {
     xml += `
   <cac:Delivery>
@@ -244,119 +328,149 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
   </cac:Delivery>`;
   }
 
-  // Payment means
+  // ========== Payment Means ==========
   xml += `
   <cac:PaymentMeans>
     <cbc:PaymentMeansCode>${paymentCode}</cbc:PaymentMeansCode>
   </cac:PaymentMeans>`;
 
-  // Document-level discount (if any)
+  // ========== Document-Level Discount ==========
   if (data.discount > 0) {
     xml += `
   <cac:AllowanceCharge>
     <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
     <cbc:AllowanceChargeReason>Discount</cbc:AllowanceChargeReason>
-    <cbc:Amount currencyID="SAR">${data.discount.toFixed(2)}</cbc:Amount>
+    <cbc:Amount currencyID="SAR">${bankersRound(data.discount).toFixed(2)}</cbc:Amount>
     <cac:TaxCategory>
-      <cbc:ID>S</cbc:ID>
-      <cbc:Percent>${data.taxRate.toFixed(2)}</cbc:Percent>
+      <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${taxCategoryId}</cbc:ID>
+      <cbc:Percent>${bankersRound(data.taxRate).toFixed(2)}</cbc:Percent>
       <cac:TaxScheme>
-        <cbc:ID>VAT</cbc:ID>
+        <cbc:ID schemeID="UN/ECE 5153" schemeAgencyID="6">VAT</cbc:ID>
       </cac:TaxScheme>
     </cac:TaxCategory>
   </cac:AllowanceCharge>`;
   }
 
-  // Delivery fee as charge (if any)
+  // ========== Delivery Fee as Charge ==========
   if (data.deliveryFee > 0) {
     xml += `
   <cac:AllowanceCharge>
     <cbc:ChargeIndicator>true</cbc:ChargeIndicator>
     <cbc:AllowanceChargeReason>Delivery Fee</cbc:AllowanceChargeReason>
-    <cbc:Amount currencyID="SAR">${data.deliveryFee.toFixed(2)}</cbc:Amount>
+    <cbc:Amount currencyID="SAR">${bankersRound(data.deliveryFee).toFixed(2)}</cbc:Amount>
     <cac:TaxCategory>
-      <cbc:ID>S</cbc:ID>
-      <cbc:Percent>${data.taxRate.toFixed(2)}</cbc:Percent>
+      <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${taxCategoryId}</cbc:ID>
+      <cbc:Percent>${bankersRound(data.taxRate).toFixed(2)}</cbc:Percent>
       <cac:TaxScheme>
-        <cbc:ID>VAT</cbc:ID>
+        <cbc:ID schemeID="UN/ECE 5153" schemeAgencyID="6">VAT</cbc:ID>
       </cac:TaxScheme>
     </cac:TaxCategory>
   </cac:AllowanceCharge>`;
   }
 
-  // Tax total
+  // ========== Tax Total (two blocks per ZATCA spec) ==========
+  // ZATCA requires: first block = TaxAmount only, second block = TaxAmount + TaxSubtotal
+  const taxableAmount = bankersRound(data.subtotal - data.discount + data.deliveryFee);
   xml += `
   <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${data.taxAmount.toFixed(2)}</cbc:TaxAmount>
+    <cbc:TaxAmount currencyID="SAR">${bankersRound(data.taxAmount).toFixed(2)}</cbc:TaxAmount>
+  </cac:TaxTotal>
+  <cac:TaxTotal>
+    <cbc:TaxAmount currencyID="SAR">${bankersRound(data.taxAmount).toFixed(2)}</cbc:TaxAmount>
     <cac:TaxSubtotal>
-      <cbc:TaxableAmount currencyID="SAR">${(data.subtotal - data.discount).toFixed(2)}</cbc:TaxableAmount>
-      <cbc:TaxAmount currencyID="SAR">${data.taxAmount.toFixed(2)}</cbc:TaxAmount>
+      <cbc:TaxableAmount currencyID="SAR">${taxableAmount.toFixed(2)}</cbc:TaxableAmount>
+      <cbc:TaxAmount currencyID="SAR">${bankersRound(data.taxAmount).toFixed(2)}</cbc:TaxAmount>
       <cac:TaxCategory>
-        <cbc:ID>${data.taxRate > 0 ? 'S' : 'Z'}</cbc:ID>
-        <cbc:Percent>${data.taxRate.toFixed(2)}</cbc:Percent>
+        <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${taxCategoryId}</cbc:ID>
+        <cbc:Percent>${bankersRound(data.taxRate).toFixed(2)}</cbc:Percent>`;
+
+  // Tax exemption reason (required for Z, E, O categories)
+  if (taxCategoryId !== TAX_CATEGORIES.STANDARD) {
+    xml += `
+        <cbc:TaxExemptionReasonCode>VATEX-SA-OOS</cbc:TaxExemptionReasonCode>
+        <cbc:TaxExemptionReason>Not subject to VAT</cbc:TaxExemptionReason>`;
+  }
+
+  xml += `
         <cac:TaxScheme>
-          <cbc:ID>VAT</cbc:ID>
+          <cbc:ID schemeID="UN/ECE 5153" schemeAgencyID="6">VAT</cbc:ID>
         </cac:TaxScheme>
       </cac:TaxCategory>
     </cac:TaxSubtotal>
-  </cac:TaxTotal>
-  <cac:TaxTotal>
-    <cbc:TaxAmount currencyID="SAR">${data.taxAmount.toFixed(2)}</cbc:TaxAmount>
   </cac:TaxTotal>`;
 
-  // Legal monetary total
-  const lineExtensionAmount = data.subtotal;
-  const taxExclusiveAmount = data.subtotal - data.discount + data.deliveryFee;
-  const taxInclusiveAmount = data.total;
-  const prepaidAmount = 0;
-  const payableAmount = data.total;
+  // ========== Legal Monetary Total ==========
+  const lineExtensionAmount = bankersRound(data.subtotal);
+  const taxInclusiveAmount = bankersRound(data.total);
+  const payableAmount = bankersRound(data.total);
 
   xml += `
   <cac:LegalMonetaryTotal>
     <cbc:LineExtensionAmount currencyID="SAR">${lineExtensionAmount.toFixed(2)}</cbc:LineExtensionAmount>
-    <cbc:TaxExclusiveAmount currencyID="SAR">${taxExclusiveAmount.toFixed(2)}</cbc:TaxExclusiveAmount>
+    <cbc:TaxExclusiveAmount currencyID="SAR">${taxableAmount.toFixed(2)}</cbc:TaxExclusiveAmount>
     <cbc:TaxInclusiveAmount currencyID="SAR">${taxInclusiveAmount.toFixed(2)}</cbc:TaxInclusiveAmount>
-    <cbc:AllowanceTotalAmount currencyID="SAR">${data.discount.toFixed(2)}</cbc:AllowanceTotalAmount>
-    <cbc:ChargeTotalAmount currencyID="SAR">${data.deliveryFee.toFixed(2)}</cbc:ChargeTotalAmount>
-    <cbc:PrepaidAmount currencyID="SAR">${prepaidAmount.toFixed(2)}</cbc:PrepaidAmount>
+    <cbc:AllowanceTotalAmount currencyID="SAR">${bankersRound(data.discount).toFixed(2)}</cbc:AllowanceTotalAmount>
+    <cbc:ChargeTotalAmount currencyID="SAR">${bankersRound(data.deliveryFee).toFixed(2)}</cbc:ChargeTotalAmount>
+    <cbc:PrepaidAmount currencyID="SAR">0.00</cbc:PrepaidAmount>
     <cbc:PayableAmount currencyID="SAR">${payableAmount.toFixed(2)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>`;
 
-  // Invoice lines
+  // ========== Invoice Lines ==========
   data.items.forEach((item, index) => {
+    const lineTaxCat = item.taxRate > 0 ? TAX_CATEGORIES.STANDARD : TAX_CATEGORIES.ZERO_RATED;
+
     xml += `
   <cac:InvoiceLine>
     <cbc:ID>${index + 1}</cbc:ID>
     <cbc:InvoicedQuantity unitCode="PCE">${item.quantity}</cbc:InvoicedQuantity>
-    <cbc:LineExtensionAmount currencyID="SAR">${item.totalWithoutTax.toFixed(2)}</cbc:LineExtensionAmount>
-    <cac:TaxTotal>
-      <cbc:TaxAmount currencyID="SAR">${item.taxAmount.toFixed(2)}</cbc:TaxAmount>
-      <cbc:RoundingAmount currencyID="SAR">${item.totalWithTax.toFixed(2)}</cbc:RoundingAmount>
-    </cac:TaxTotal>
-    <cac:Item>
-      <cbc:Name>${escapeXml(item.nameAr || item.nameEn || 'Item')}</cbc:Name>
-      <cac:ClassifiedTaxCategory>
-        <cbc:ID>${item.taxRate > 0 ? 'S' : 'Z'}</cbc:ID>
-        <cbc:Percent>${item.taxRate.toFixed(2)}</cbc:Percent>
-        <cac:TaxScheme>
-          <cbc:ID>VAT</cbc:ID>
-        </cac:TaxScheme>
-      </cac:ClassifiedTaxCategory>
-    </cac:Item>
-    <cac:Price>
-      <cbc:PriceAmount currencyID="SAR">${item.unitPrice.toFixed(2)}</cbc:PriceAmount>
-    </cac:Price>`;
+    <cbc:LineExtensionAmount currencyID="SAR">${bankersRound(item.totalWithoutTax).toFixed(2)}</cbc:LineExtensionAmount>`;
 
     if (item.discount > 0) {
       xml += `
     <cac:AllowanceCharge>
       <cbc:ChargeIndicator>false</cbc:ChargeIndicator>
       <cbc:AllowanceChargeReason>Discount</cbc:AllowanceChargeReason>
-      <cbc:Amount currencyID="SAR">${item.discount.toFixed(2)}</cbc:Amount>
+      <cbc:Amount currencyID="SAR">${bankersRound(item.discount).toFixed(2)}</cbc:Amount>
+      <cac:TaxCategory>
+        <cbc:ID>${lineTaxCat}</cbc:ID>
+        <cbc:Percent>${bankersRound(item.taxRate).toFixed(2)}</cbc:Percent>
+        <cac:TaxScheme>
+          <cbc:ID>VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:TaxCategory>
     </cac:AllowanceCharge>`;
     }
 
     xml += `
+    <cac:TaxTotal>
+      <cbc:TaxAmount currencyID="SAR">${bankersRound(item.taxAmount).toFixed(2)}</cbc:TaxAmount>
+      <cbc:RoundingAmount currencyID="SAR">${bankersRound(item.totalWithTax).toFixed(2)}</cbc:RoundingAmount>
+    </cac:TaxTotal>
+    <cac:Item>
+      <cbc:Name>${escapeXml(item.nameAr || item.nameEn || 'Item')}</cbc:Name>
+      <cac:ClassifiedTaxCategory>
+        <cbc:ID schemeID="UN/ECE 5305" schemeAgencyID="6">${lineTaxCat}</cbc:ID>
+        <cbc:Percent>${bankersRound(item.taxRate).toFixed(2)}</cbc:Percent>`;
+
+    // Tax exemption at line level (BR-KSA-73)
+    if (lineTaxCat !== TAX_CATEGORIES.STANDARD) {
+      const exemptionCode = item.taxExemptionReasonCode || 'VATEX-SA-OOS';
+      const exemptionReason = item.taxExemptionReason ||
+        TAX_EXEMPTION_REASONS[exemptionCode] || 'Not subject to VAT';
+      xml += `
+        <cbc:TaxExemptionReasonCode>${exemptionCode}</cbc:TaxExemptionReasonCode>
+        <cbc:TaxExemptionReason>${escapeXml(exemptionReason)}</cbc:TaxExemptionReason>`;
+    }
+
+    xml += `
+        <cac:TaxScheme>
+          <cbc:ID schemeID="UN/ECE 5153" schemeAgencyID="6">VAT</cbc:ID>
+        </cac:TaxScheme>
+      </cac:ClassifiedTaxCategory>
+    </cac:Item>
+    <cac:Price>
+      <cbc:PriceAmount currencyID="SAR">${bankersRound(item.unitPrice).toFixed(2)}</cbc:PriceAmount>
+    </cac:Price>
   </cac:InvoiceLine>`;
   });
 
@@ -367,7 +481,7 @@ export function generateZatcaXml(data: ZatcaInvoiceData): string {
 }
 
 // ===========================================
-// QR Code TLV Encoder (Phase 1 & 2)
+// QR Code TLV Encoder — Phase 2 (9 Tags)
 // ===========================================
 export function generateZatcaTlvQrCode(data: {
   sellerName: string;
@@ -375,7 +489,6 @@ export function generateZatcaTlvQrCode(data: {
   timestamp: string;
   total: string;
   vatAmount: string;
-  // Phase 2 additional fields
   invoiceHash?: string;
   digitalSignature?: string;
   publicKey?: string;
@@ -383,7 +496,6 @@ export function generateZatcaTlvQrCode(data: {
 }): string {
   const tlvEncode = (tag: number, value: string | Buffer): Buffer => {
     const valueBuffer = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
-    // For lengths > 127, use multi-byte length
     if (valueBuffer.length > 127) {
       const lenBuf = Buffer.alloc(3);
       lenBuf[0] = 0x82;
@@ -405,7 +517,6 @@ export function generateZatcaTlvQrCode(data: {
     tlvEncode(5, data.vatAmount),
   ];
 
-  // Phase 2 additional tags
   if (data.invoiceHash) {
     parts.push(tlvEncode(6, Buffer.from(data.invoiceHash, 'hex')));
   }
@@ -423,14 +534,37 @@ export function generateZatcaTlvQrCode(data: {
 }
 
 // ===========================================
-// Invoice Hash Generator (SHA-256)
+// Invoice Hash (SHA-256)
+// Excludes: QR, Signature, UBLExtensions (per ZATCA §6.6)
 // ===========================================
+function stripHashExclusions(xml: string): string {
+  let stripped = xml.replace(
+    /<cac:AdditionalDocumentReference>\s*<cbc:ID>QR<\/cbc:ID>[\s\S]*?<\/cac:AdditionalDocumentReference>/g,
+    ''
+  );
+  stripped = stripped.replace(
+    /<cac:Signature>[\s\S]*?<\/cac:Signature>/g,
+    ''
+  );
+  stripped = stripped.replace(
+    /<ext:UBLExtensions>[\s\S]*?<\/ext:UBLExtensions>/g,
+    ''
+  );
+  return stripped;
+}
+
 export function computeInvoiceHash(xmlContent: string): string {
-  return crypto.createHash('sha256').update(xmlContent, 'utf8').digest('hex');
+  const hashInput = stripHashExclusions(xmlContent);
+  return crypto.createHash('sha256').update(hashInput, 'utf8').digest('hex');
 }
 
 export function computeInvoiceHashBase64(xmlContent: string): string {
-  return crypto.createHash('sha256').update(xmlContent, 'utf8').digest('base64');
+  const hashInput = stripHashExclusions(xmlContent);
+  return crypto.createHash('sha256').update(hashInput, 'utf8').digest('base64');
+}
+
+export function injectQrCodeIntoXml(xmlContent: string, qrBase64: string): string {
+  return xmlContent.replace('__QR_PLACEHOLDER__', qrBase64);
 }
 
 // ===========================================
@@ -451,6 +585,458 @@ function escapeXml(str: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 }
+
+
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  ASN.1 DER ENCODER — Minimal for CSR generation                ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+function derLength(length: number): Buffer {
+  if (length < 0x80) return Buffer.from([length]);
+  if (length < 0x100) return Buffer.from([0x81, length]);
+  if (length < 0x10000) {
+    const buf = Buffer.alloc(3);
+    buf[0] = 0x82;
+    buf.writeUInt16BE(length, 1);
+    return buf;
+  }
+  const buf = Buffer.alloc(4);
+  buf[0] = 0x83;
+  buf[1] = (length >> 16) & 0xff;
+  buf[2] = (length >> 8) & 0xff;
+  buf[3] = length & 0xff;
+  return buf;
+}
+
+function derWrap(tag: number, content: Buffer): Buffer {
+  return Buffer.concat([Buffer.from([tag]), derLength(content.length), content]);
+}
+
+function derSequence(...items: Buffer[]): Buffer {
+  return derWrap(0x30, Buffer.concat(items));
+}
+
+function derSet(...items: Buffer[]): Buffer {
+  return derWrap(0x31, Buffer.concat(items));
+}
+
+function derInteger(value: number): Buffer {
+  if (value === 0) return derWrap(0x02, Buffer.from([0x00]));
+  const bytes: number[] = [];
+  let v = value;
+  while (v > 0) { bytes.unshift(v & 0xff); v >>= 8; }
+  if (bytes[0] & 0x80) bytes.unshift(0x00);
+  return derWrap(0x02, Buffer.from(bytes));
+}
+
+function derOid(oid: string): Buffer {
+  const parts = oid.split('.').map(Number);
+  const bytes: number[] = [parts[0] * 40 + parts[1]];
+  for (let i = 2; i < parts.length; i++) {
+    let val = parts[i];
+    if (val < 128) { bytes.push(val); }
+    else {
+      const enc: number[] = [];
+      enc.push(val & 0x7f); val >>= 7;
+      while (val > 0) { enc.push((val & 0x7f) | 0x80); val >>= 7; }
+      enc.reverse();
+      bytes.push(...enc);
+    }
+  }
+  return derWrap(0x06, Buffer.from(bytes));
+}
+
+function derUtf8String(value: string): Buffer {
+  return derWrap(0x0c, Buffer.from(value, 'utf8'));
+}
+
+function derPrintableString(value: string): Buffer {
+  return derWrap(0x13, Buffer.from(value, 'ascii'));
+}
+
+function derBitString(content: Buffer): Buffer {
+  return derWrap(0x03, Buffer.concat([Buffer.from([0x00]), content]));
+}
+
+function derOctetString(content: Buffer): Buffer {
+  return derWrap(0x04, content);
+}
+
+function derBoolean(value: boolean): Buffer {
+  return derWrap(0x01, Buffer.from([value ? 0xff : 0x00]));
+}
+
+function derContextConstructed(tag: number, content: Buffer): Buffer {
+  return derWrap(0xa0 | tag, content);
+}
+
+// Well-known OIDs
+const OID = {
+  countryName: '2.5.4.6',
+  organization: '2.5.4.10',
+  organizationalUnit: '2.5.4.11',
+  commonName: '2.5.4.3',
+  organizationIdentifier: '2.5.4.97',
+  serialNumber: '2.5.4.5',
+  ecPublicKey: '1.2.840.10045.2.1',
+  secp256k1: '1.3.132.0.10',
+  ecdsaWithSHA256: '1.2.840.10045.4.3.2',
+  extensionRequest: '1.2.840.113549.1.9.14',
+  subjectAltName: '2.5.29.17',
+  certificateTemplateName: '1.3.6.1.4.1.311.20.2',
+  surname: '2.5.4.4',
+  userId: '0.9.2342.19200300.100.1.1',
+  title: '2.5.4.12',
+  registeredAddress: '2.5.4.26',
+  businessCategory: '2.5.4.15',
+};
+
+function buildRdn(oidStr: string, value: string, useUtf8 = true): Buffer {
+  const attrValue = useUtf8 ? derUtf8String(value) : derPrintableString(value);
+  return derSet(derSequence(derOid(oidStr), attrValue));
+}
+
+
+// ===========================================
+// CSR Generation — ECDSA secp256k1
+// ===========================================
+/**
+ * Generate a real PKCS#10 CSR for ZATCA device registration.
+ * Includes ZATCA-required extensions:
+ * - Certificate Template Name (OID 1.3.6.1.4.1.311.20.2)
+ * - Subject Alternative Name (OID 2.5.29.17) with directoryName
+ */
+export function generateZatcaCsr(data: {
+  commonName: string;
+  organizationIdentifier: string;
+  organizationUnit: string;
+  organizationName: string;
+  countryCode: string;
+  invoiceType: string;
+  location: string;
+  industry: string;
+}): { csr: string; privateKey: string } {
+  // 1. Generate ECDSA secp256k1 key pair
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
+    namedCurve: 'secp256k1',
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+
+  // 2. Build Subject DN
+  // serialNumber must use a UUID in the 3rd segment as required by ZATCA
+  const serialNumberValue = `1-TST|2-TST|3-${crypto.randomUUID()}`;
+  const subject = derSequence(
+    buildRdn(OID.countryName, data.countryCode, false),
+    buildRdn(OID.organization, data.organizationName),
+    buildRdn(OID.organizationalUnit, data.organizationUnit),
+    buildRdn(OID.commonName, data.commonName),
+    buildRdn(OID.serialNumber, serialNumberValue, false),
+    buildRdn(OID.organizationIdentifier, data.organizationIdentifier),
+  );
+
+  // 3. SubjectPublicKeyInfo (already DER-encoded from crypto)
+  const spki = Buffer.from(publicKey);
+
+  // 4. Build Extensions
+
+  // Certificate Template Name (UTF8String — required by ZATCA sandbox)
+  const templateExt = derSequence(
+    derOid(OID.certificateTemplateName),
+    derOctetString(derUtf8String('ZATCA-Code-Signing')),
+  );
+
+  // Subject Alternative Name (directoryName with ZATCA fields)
+  const sanDirName = derSequence(
+    buildRdn(OID.surname, serialNumberValue, false),
+    buildRdn(OID.userId, data.commonName, false),
+    buildRdn(OID.title, data.invoiceType, false),
+    buildRdn(OID.registeredAddress, data.location),
+    buildRdn(OID.businessCategory, data.industry),
+  );
+  const sanGeneralName = derContextConstructed(4, sanDirName);
+  const sanValue = derSequence(sanGeneralName);
+  const sanExt = derSequence(
+    derOid(OID.subjectAltName),
+    derBoolean(true),
+    derOctetString(sanValue),
+  );
+
+  const extensions = derSequence(templateExt, sanExt);
+  const extensionRequest = derSequence(
+    derOid(OID.extensionRequest),
+    derSet(extensions),
+  );
+  const attributes = derContextConstructed(0, extensionRequest);
+
+  // 5. Build CertificationRequestInfo
+  const certRequestInfo = derSequence(
+    derInteger(0),
+    subject,
+    spki,
+    attributes,
+  );
+
+  // 6. Sign CertificationRequestInfo
+  const signer = crypto.createSign('SHA256');
+  signer.update(certRequestInfo);
+  const signature = signer.sign({ key: privateKey, dsaEncoding: 'der' });
+
+  // 7. Signature algorithm identifier
+  const signatureAlgorithm = derSequence(derOid(OID.ecdsaWithSHA256));
+
+  // 8. Wrap in CertificationRequest SEQUENCE
+  const csr = derSequence(certRequestInfo, signatureAlgorithm, derBitString(signature));
+
+  // 9. Encode as PEM
+  const csrBase64 = csr.toString('base64');
+  const csrPem = [
+    '-----BEGIN CERTIFICATE REQUEST-----',
+    ...csrBase64.match(/.{1,64}/g)!,
+    '-----END CERTIFICATE REQUEST-----',
+  ].join('\n');
+
+  return { csr: csrPem, privateKey };
+}
+
+
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  XAdES-BES DIGITAL SIGNATURE                                    ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+/**
+ * Parse X.509 certificate info from ZATCA BinarySecurityToken
+ */
+export function parseCertificateInfo(certBase64: string): {
+  issuerName: string;
+  serialNumber: string;
+  publicKeyBase64: string;
+  certHashBase64: string;
+} {
+  try {
+    const certDer = Buffer.from(certBase64, 'base64');
+    const certPem = `-----BEGIN CERTIFICATE-----\n${certBase64}\n-----END CERTIFICATE-----`;
+    const x509 = new crypto.X509Certificate(certPem);
+
+    const issuerName = x509.issuer;
+    const serialNumber = BigInt('0x' + x509.serialNumber).toString(10);
+    const pubKeyDer = x509.publicKey.export({ type: 'spki', format: 'der' });
+    const publicKeyBase64 = Buffer.from(pubKeyDer).toString('base64');
+    const certHash = crypto.createHash('sha256').update(certDer).digest('base64');
+
+    return { issuerName, serialNumber, publicKeyBase64, certHashBase64: certHash };
+  } catch (err: any) {
+    console.error('Certificate parsing error:', err?.message);
+    return {
+      issuerName: 'CN=Unknown',
+      serialNumber: '0',
+      publicKeyBase64: '',
+      certHashBase64: crypto.createHash('sha256').update(Buffer.from(certBase64, 'base64')).digest('base64'),
+    };
+  }
+}
+
+/**
+ * Build XAdES-BES SignedProperties XML
+ */
+function buildSignedProperties(
+  signingTime: string,
+  certHashBase64: string,
+  issuerName: string,
+  serialNumber: string,
+): string {
+  return `<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="xadesSignedProperties">
+                  <xades:SignedSignatureProperties>
+                    <xades:SigningTime>${signingTime}</xades:SigningTime>
+                    <xades:SigningCertificate>
+                      <xades:Cert>
+                        <xades:CertDigest>
+                          <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+                          <ds:DigestValue>${certHashBase64}</ds:DigestValue>
+                        </xades:CertDigest>
+                        <xades:IssuerSerial>
+                          <ds:X509IssuerName>${escapeXml(issuerName)}</ds:X509IssuerName>
+                          <ds:X509SerialNumber>${serialNumber}</ds:X509SerialNumber>
+                        </xades:IssuerSerial>
+                      </xades:Cert>
+                    </xades:SigningCertificate>
+                  </xades:SignedSignatureProperties>
+                </xades:SignedProperties>`;
+}
+
+/**
+ * Build ds:SignedInfo with invoice hash + signed properties hash
+ */
+function buildSignedInfo(
+  invoiceHashBase64: string,
+  signedPropsHashBase64: string,
+): string {
+  return `<ds:SignedInfo>
+              <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2006/12/xml-c14n11"/>
+              <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256"/>
+              <ds:Reference Id="invoiceSignedData" URI="">
+                <ds:Transforms>
+                  <ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116">
+                    <ds:XPath>not(//ancestor-or-self::ext:UBLExtensions)</ds:XPath>
+                  </ds:Transform>
+                  <ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116">
+                    <ds:XPath>not(//ancestor-or-self::cac:Signature)</ds:XPath>
+                  </ds:Transform>
+                  <ds:Transform Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116">
+                    <ds:XPath>not(//ancestor-or-self::cac:AdditionalDocumentReference[cbc:ID='QR'])</ds:XPath>
+                  </ds:Transform>
+                  <ds:Transform Algorithm="http://www.w3.org/2006/12/xml-c14n11"/>
+                </ds:Transforms>
+                <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+                <ds:DigestValue>${invoiceHashBase64}</ds:DigestValue>
+              </ds:Reference>
+              <ds:Reference Type="http://www.w3.org/2000/09/xmldsig#SignatureProperties" URI="#xadesSignedProperties">
+                <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+                <ds:DigestValue>${signedPropsHashBase64}</ds:DigestValue>
+              </ds:Reference>
+            </ds:SignedInfo>`;
+}
+
+/**
+ * Sign invoice XML with XAdES-BES digital signature.
+ * Adds ext:UBLExtensions block with full ds:Signature.
+ */
+export function signInvoiceXml(
+  unsignedXml: string,
+  privateKeyPem: string,
+  certificateBase64: string,
+): {
+  signedXml: string;
+  signatureValue: string;
+  publicKeyBase64: string;
+} {
+  // 1. Compute invoice hash
+  const invoiceHashBase64 = computeInvoiceHashBase64(unsignedXml);
+
+  // 2. Parse certificate
+  const certInfo = parseCertificateInfo(certificateBase64);
+  const signingTime = new Date().toISOString();
+
+  // 3. Build SignedProperties
+  const signedPropsXml = buildSignedProperties(
+    signingTime, certInfo.certHashBase64, certInfo.issuerName, certInfo.serialNumber,
+  );
+
+  // 4. Hash SignedProperties
+  const signedPropsHash = crypto.createHash('sha256').update(signedPropsXml, 'utf8').digest('base64');
+
+  // 5. Build SignedInfo
+  const signedInfoXml = buildSignedInfo(invoiceHashBase64, signedPropsHash);
+
+  // 6. Sign SignedInfo (ECDSA-SHA256)
+  const signer = crypto.createSign('SHA256');
+  signer.update(signedInfoXml, 'utf8');
+  const signatureBytes = signer.sign({ key: privateKeyPem, dsaEncoding: 'der' });
+  const signatureValue = signatureBytes.toString('base64');
+
+  // 7. Build UBLExtensions
+  const ublExtensions = `<ext:UBLExtensions>
+    <ext:UBLExtension>
+      <ext:ExtensionURI>urn:oasis:names:specification:ubl:dsig:enveloped:xades</ext:ExtensionURI>
+      <ext:ExtensionContent>
+        <sig:UBLDocumentSignatures xmlns:sig="urn:oasis:names:specification:ubl:schema:xsd:CommonSignatureComponents-2"
+                                   xmlns:sac="urn:oasis:names:specification:ubl:schema:xsd:SignatureAggregateComponents-2"
+                                   xmlns:sbc="urn:oasis:names:specification:ubl:schema:xsd:SignatureBasicComponents-2">
+          <sac:SignatureInformation>
+            <cbc:ID>urn:oasis:names:specification:ubl:signature:1</cbc:ID>
+            <sbc:ReferencedSignatureID>urn:oasis:names:specification:ubl:signature:Invoice</sbc:ReferencedSignatureID>
+            <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="signature">
+            ${signedInfoXml}
+            <ds:SignatureValue>${signatureValue}</ds:SignatureValue>
+            <ds:KeyInfo>
+              <ds:X509Data>
+                <ds:X509Certificate>${certificateBase64}</ds:X509Certificate>
+              </ds:X509Data>
+            </ds:KeyInfo>
+            <ds:Object>
+              <xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Target="signature">
+                ${signedPropsXml}
+              </xades:QualifyingProperties>
+            </ds:Object>
+            </ds:Signature>
+          </sac:SignatureInformation>
+        </sig:UBLDocumentSignatures>
+      </ext:ExtensionContent>
+    </ext:UBLExtension>
+  </ext:UBLExtensions>`;
+
+  // 8. Insert UBLExtensions after opening <Invoice> tag
+  const signedXml = unsignedXml.replace(
+    /(<Invoice[^>]*>)/,
+    `$1\n  ${ublExtensions}`,
+  );
+
+  return { signedXml, signatureValue, publicKeyBase64: certInfo.publicKeyBase64 };
+}
+
+
+// ===========================================
+// Full Signing + QR Pipeline
+// ===========================================
+/**
+ * Complete pipeline:
+ * 1. Sign XML with XAdES-BES (if credentials available)
+ * 2. Generate Phase 2 QR code (with signature + pubkey + CSID)
+ * 3. Inject QR into final XML
+ */
+export function buildSignedInvoice(
+  unsignedXml: string,
+  privateKeyPem: string | null,
+  certificateBase64: string | null,
+  qrBaseData: {
+    sellerName: string;
+    vatNumber: string;
+    timestamp: string;
+    total: string;
+    vatAmount: string;
+  },
+): {
+  finalXml: string;
+  invoiceHash: string;
+  qrData: string;
+  signatureValue: string | null;
+  signedXml: string | null;
+} {
+  const invoiceHash = computeInvoiceHash(unsignedXml);
+  const invoiceHashBase64 = computeInvoiceHashBase64(unsignedXml);
+
+  let xmlToProcess = unsignedXml;
+  let signatureValue: string | null = null;
+  let signedXml: string | null = null;
+  let publicKeyBase64 = '';
+  let csidStamp = '';
+
+  if (privateKeyPem && certificateBase64) {
+    try {
+      const signed = signInvoiceXml(unsignedXml, privateKeyPem, certificateBase64);
+      xmlToProcess = signed.signedXml;
+      signatureValue = signed.signatureValue;
+      signedXml = signed.signedXml;
+      publicKeyBase64 = signed.publicKeyBase64;
+      csidStamp = certificateBase64; // CSID token is tag 9
+    } catch (err: any) {
+      console.error('Invoice signing failed, submitting unsigned:', err?.message);
+    }
+  }
+
+  const qrData = generateZatcaTlvQrCode({
+    ...qrBaseData,
+    invoiceHash,
+    digitalSignature: signatureValue || undefined,
+    publicKey: publicKeyBase64 || undefined,
+    csidStamp: csidStamp || undefined,
+  });
+
+  const finalXml = injectQrCodeIntoXml(xmlToProcess, qrData);
+
+  return { finalXml, invoiceHash: invoiceHashBase64, qrData, signatureValue, signedXml };
+}
+
 
 // ===========================================
 // ZATCA API Client
@@ -474,52 +1060,92 @@ export function getZatcaBaseUrl(environment: string): string {
   }
 }
 
-/**
- * Generate CSR (Certificate Signing Request) for ZATCA device registration
- */
-export function generateZatcaCsr(data: {
-  commonName: string;
-  organizationIdentifier: string;
-  organizationUnit: string;
-  organizationName: string;
-  countryCode: string;
-  invoiceType: string;
-  location: string;
-  industry: string;
-}): { csr: string; privateKey: string } {
-  // Generate ECDSA key pair (secp256k1)
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-    namedCurve: 'secp256k1',
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  });
+// ─── Mock Mode (local testing without a ZATCA account) ──────────────────────
 
-  // CSR generation would typically use a library like node-forge
-  // For now, we return the keys and build CSR manually
-  const csrTemplate = `-----BEGIN CERTIFICATE REQUEST-----
-[CSR_CONTENT]
------END CERTIFICATE REQUEST-----`;
+export function isMockEnvironment(environment: string): boolean {
+  return environment === 'mock';
+}
 
+export function mockGetComplianceCsid(): {
+  requestID: string; binarySecurityToken: string; secret: string;
+  tokenType: string; dispositionMessage: string;
+} {
   return {
-    csr: csrTemplate,
-    privateKey: privateKey,
+    requestID: `MOCK-COMP-${Date.now()}`,
+    binarySecurityToken: Buffer.from('MOCK_COMPLIANCE_CERTIFICATE_FOR_TESTING').toString('base64'),
+    secret: 'mock-compliance-secret',
+    tokenType: 'urn:ietf:params:oauth:token-type:jwt',
+    dispositionMessage: 'ISSUED (MOCK)',
+  };
+}
+
+export function mockSubmitComplianceInvoice(): {
+  validationResults: { status: string; infoMessages: any[]; warningMessages: any[]; errorMessages: any[] };
+  reportingStatus: string;
+} {
+  return {
+    validationResults: { status: 'PASS', infoMessages: [], warningMessages: [], errorMessages: [] },
+    reportingStatus: 'REPORTED',
+  };
+}
+
+export function mockGetProductionCsid(): {
+  requestID: string; binarySecurityToken: string; secret: string;
+  tokenType: string; dispositionMessage: string;
+} {
+  return {
+    requestID: `MOCK-PROD-${Date.now()}`,
+    binarySecurityToken: Buffer.from('MOCK_PRODUCTION_CERTIFICATE_FOR_TESTING').toString('base64'),
+    secret: 'mock-production-secret',
+    tokenType: 'urn:ietf:params:oauth:token-type:jwt',
+    dispositionMessage: 'ISSUED (MOCK)',
+  };
+}
+
+export function mockReportInvoice(): {
+  validationResults: { status: string; infoMessages: any[]; warningMessages: any[]; errorMessages: any[] };
+  reportingStatus: string;
+} {
+  return {
+    validationResults: { status: 'PASS', infoMessages: [], warningMessages: [], errorMessages: [] },
+    reportingStatus: 'REPORTED',
+  };
+}
+
+export function mockClearInvoice(): {
+  validationResults: { status: string; infoMessages: any[]; warningMessages: any[]; errorMessages: any[] };
+  clearanceStatus: string;
+  clearedInvoice?: string;
+} {
+  return {
+    validationResults: { status: 'PASS', infoMessages: [], warningMessages: [], errorMessages: [] },
+    clearanceStatus: 'CLEARED',
   };
 }
 
 /**
- * Get Compliance CSID from ZATCA
+ * Get Compliance CSID from ZATCA (Step 1)
  */
 export async function getComplianceCsid(
   baseUrl: string,
   otp: string,
   csr: string
 ): Promise<{
-  requestId: string;
+  requestID: string;
   binarySecurityToken: string;
   secret: string;
   tokenType: string;
   dispositionMessage: string;
 }> {
+  // Strip PEM headers - ZATCA expects raw base64 CSR content
+  const csrClean = csr
+    .replace(/-----BEGIN CERTIFICATE REQUEST-----/g, '')
+    .replace(/-----END CERTIFICATE REQUEST-----/g, '')
+    .replace(/\s/g, '');
+
+  console.log(`[ZATCA] Sending compliance request to ${baseUrl}/compliance`);
+  console.log(`[ZATCA] OTP: ${otp}, CSR length: ${csrClean.length}`);
+
   const response = await fetch(`${baseUrl}/compliance`, {
     method: 'POST',
     headers: {
@@ -529,19 +1155,27 @@ export async function getComplianceCsid(
       'Accept-Version': 'V2',
       'Accept-Language': 'en',
     },
-    body: JSON.stringify({ csr }),
+    body: JSON.stringify({ csr: csrClean }),
   });
-
   if (!response.ok) {
     const errorText = await response.text();
+    console.error(`[ZATCA] Compliance failed: ${response.status}`, errorText);
+    console.error(`[ZATCA] Response headers:`, JSON.stringify(Object.fromEntries(response.headers.entries())));
+    console.error(`[ZATCA] CSR sent (first 200 chars):`, csrClean.substring(0, 200));
+    
+    // Try to parse error details
+    try {
+      const errorJson = JSON.parse(errorText);
+      console.error(`[ZATCA] Error details:`, JSON.stringify(errorJson, null, 2));
+    } catch {}
+    
     throw new Error(`ZATCA Compliance CSID failed: ${response.status} - ${errorText}`);
   }
-
   return response.json();
 }
 
 /**
- * Submit invoice for compliance check
+ * Submit invoice for compliance check (Step 2)
  */
 export async function submitComplianceInvoice(
   baseUrl: string,
@@ -561,7 +1195,6 @@ export async function submitComplianceInvoice(
   clearanceStatus?: string;
 }> {
   const authToken = Buffer.from(`${certificate}:${secret}`).toString('base64');
-
   const response = await fetch(`${baseUrl}/compliance/invoices`, {
     method: 'POST',
     headers: {
@@ -577,17 +1210,15 @@ export async function submitComplianceInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
-
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`ZATCA Compliance check failed: ${response.status} - ${errorText}`);
   }
-
   return response.json();
 }
 
 /**
- * Get Production CSID from ZATCA
+ * Get Production CSID from ZATCA (Step 3)
  */
 export async function getProductionCsid(
   baseUrl: string,
@@ -595,14 +1226,13 @@ export async function getProductionCsid(
   certificate: string,
   secret: string
 ): Promise<{
-  requestId: string;
+  requestID: string;
   binarySecurityToken: string;
   secret: string;
   tokenType: string;
   dispositionMessage: string;
 }> {
   const authToken = Buffer.from(`${certificate}:${secret}`).toString('base64');
-
   const response = await fetch(`${baseUrl}/production/csids`, {
     method: 'POST',
     headers: {
@@ -614,17 +1244,15 @@ export async function getProductionCsid(
     },
     body: JSON.stringify({ compliance_request_id: complianceRequestId }),
   });
-
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`ZATCA Production CSID failed: ${response.status} - ${errorText}`);
   }
-
   return response.json();
 }
 
 /**
- * Report simplified invoice to ZATCA
+ * Report simplified invoice to ZATCA (Clearance-Status: 0)
  */
 export async function reportInvoice(
   baseUrl: string,
@@ -643,7 +1271,6 @@ export async function reportInvoice(
   reportingStatus: string;
 }> {
   const authToken = Buffer.from(`${certificate}:${secret}`).toString('base64');
-
   const response = await fetch(`${baseUrl}/invoices/reporting/single`, {
     method: 'POST',
     headers: {
@@ -660,17 +1287,15 @@ export async function reportInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
-
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`ZATCA Reporting failed: ${response.status} - ${errorText}`);
   }
-
   return response.json();
 }
 
 /**
- * Submit standard invoice for clearance to ZATCA
+ * Submit standard invoice for clearance (Clearance-Status: 1)
  */
 export async function clearInvoice(
   baseUrl: string,
@@ -690,7 +1315,6 @@ export async function clearInvoice(
   clearedInvoice?: string;
 }> {
   const authToken = Buffer.from(`${certificate}:${secret}`).toString('base64');
-
   const response = await fetch(`${baseUrl}/invoices/clearance/single`, {
     method: 'POST',
     headers: {
@@ -707,11 +1331,34 @@ export async function clearInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
-
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`ZATCA Clearance failed: ${response.status} - ${errorText}`);
   }
-
   return response.json();
+}
+
+/**
+ * B2B buyer validation — ZATCA requires full buyer info for standard invoices
+ */
+export function validateB2BBuyer(buyer?: ZatcaInvoiceData['buyer']): string[] {
+  const errors: string[] = [];
+  if (!buyer) {
+    errors.push('Buyer information is required for standard (B2B) invoices');
+    return errors;
+  }
+  if (!buyer.name?.trim()) {
+    errors.push('Buyer name (RegistrationName) is required for B2B invoices (BR-KSA-46)');
+  }
+  if (!buyer.vatNumber?.trim()) {
+    errors.push('Buyer VAT number is required for B2B invoices (BR-KSA-46)');
+  }
+  if (buyer.vatNumber && !/^\d{15}$/.test(buyer.vatNumber.trim())) {
+    errors.push('Buyer VAT number must be exactly 15 digits (BR-KSA-46)');
+  }
+  if (!buyer.streetName) errors.push('Buyer street name is required for B2B invoices (BR-KSA-09)');
+  if (!buyer.city) errors.push('Buyer city is required for B2B invoices (BR-KSA-10)');
+  if (!buyer.postalCode) errors.push('Buyer postal code is required for B2B invoices');
+  if (!buyer.buildingNumber) errors.push('Buyer building number is required for B2B invoices (BR-KSA-63)');
+  return errors;
 }

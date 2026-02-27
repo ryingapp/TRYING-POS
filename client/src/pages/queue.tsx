@@ -87,8 +87,7 @@ export default function QueuePage() {
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/queue/stats"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
       setIsAddDialogOpen(false);
       setFormData({ customerName: "", customerPhone: "", partySize: 2, notes: "" });
       toast({
@@ -110,8 +109,7 @@ export default function QueuePage() {
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/queue/stats"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
     },
   });
 
@@ -125,7 +123,7 @@ export default function QueuePage() {
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
       toast({
         title: language === "ar" ? "تم الإشعار" : "Notified",
         description: language === "ar" ? "تم إشعار العميل" : "Customer notified",

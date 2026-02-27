@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Search, Edit2, Trash2 } from "lucide-react";
+import { Plus, Search, Edit2, Trash2, Users, Phone, Mail, ShoppingBag } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -147,29 +147,77 @@ export default function CustomersPage() {
   const isPending = createMutation.isPending || updateMutation.isPending;
 
   return (
-    <div className="p-6 space-y-6" dir={direction}>
+    <div className="p-6 space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">
-            {t("customers") || (language === "ar" ? "العملاء" : "Customers")}
+            {language === "ar" ? "العملاء" : "Customers"}
           </h1>
+          <p className="text-muted-foreground">
+            {language === "ar" ? "إدارة بيانات العملاء" : "Manage customer data"}
+          </p>
         </div>
         <Button onClick={openAddDialog}>
-          <Plus className="w-4 h-4 mr-2" />
-          {t("addCustomer") || (language === "ar" ? "إضافة عميل" : "Add Customer")}
+          <Plus className="w-4 h-4 ltr:mr-2 rtl:ml-2" />
+          {language === "ar" ? "إضافة عميل" : "Add Customer"}
         </Button>
       </div>
 
-      <div className="flex flex-col gap-4 sm:flex-row">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
-          <Input
-            placeholder={language === "ar" ? "بحث بالاسم أو الهاتف..." : "Search by name or phone..."}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-10"
-          />
-        </div>
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">{language === "ar" ? "إجمالي العملاء" : "Total Customers"}</CardTitle>
+            <Users className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{customers?.length || 0}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">{language === "ar" ? "إجمالي الطلبات" : "Total Orders"}</CardTitle>
+            <ShoppingBag className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{customers?.reduce((sum, c) => sum + (c.totalOrders || 0), 0) || 0}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">{language === "ar" ? "إجمالي الإيرادات" : "Total Revenue"}</CardTitle>
+            <span className="text-sm text-muted-foreground">{language === "ar" ? "ر.س" : "SAR"}</span>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {(customers?.reduce((sum, c) => sum + parseFloat(c.totalSpent || "0"), 0) || 0).toFixed(2)}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">{language === "ar" ? "متوسط الإنفاق" : "Avg. Spend"}</CardTitle>
+            <span className="text-sm text-muted-foreground">{language === "ar" ? "ر.س" : "SAR"}</span>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {customers && customers.length > 0
+                ? (customers.reduce((sum, c) => sum + parseFloat(c.totalSpent || "0"), 0) / customers.length).toFixed(2)
+                : "0.00"}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Search */}
+      <div className="relative max-w-md">
+        <Search className="absolute start-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
+        <Input
+          placeholder={language === "ar" ? "بحث بالاسم أو الهاتف..." : "Search by name or phone..."}
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="ps-10"
+        />
       </div>
 
       {isLoading ? (
@@ -183,34 +231,34 @@ export default function CustomersPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("name")}</TableHead>
-                <TableHead>{t("phone")}</TableHead>
-                <TableHead>{t("email")}</TableHead>
-                <TableHead>{t("totalOrders")}</TableHead>
-                <TableHead>{t("totalSpent") || (language === "ar" ? "إجمالي المصروفات" : "Total Spent")}</TableHead>
-                <TableHead>{t("lastOrder") || (language === "ar" ? "آخر طلب" : "Last Order")}</TableHead>
-                <TableHead>{t("actions")}</TableHead>
+                <TableHead>{language === "ar" ? "الاسم" : "Name"}</TableHead>
+                <TableHead>{language === "ar" ? "الهاتف" : "Phone"}</TableHead>
+                <TableHead className="hidden md:table-cell">{language === "ar" ? "البريد" : "Email"}</TableHead>
+                <TableHead className="text-center">{language === "ar" ? "الطلبات" : "Orders"}</TableHead>
+                <TableHead>{language === "ar" ? "إجمالي الإنفاق" : "Total Spent"}</TableHead>
+                <TableHead className="hidden sm:table-cell">{language === "ar" ? "آخر طلب" : "Last Order"}</TableHead>
+                <TableHead className="text-center">{language === "ar" ? "الإجراءات" : "Actions"}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredCustomers.map((customer) => (
                 <TableRow key={customer.id}>
                   <TableCell className="font-medium">{customer.name || "-"}</TableCell>
-                  <TableCell>{customer.phone}</TableCell>
-                  <TableCell>{customer.email || "-"}</TableCell>
-                  <TableCell>
+                  <TableCell dir="ltr" className="text-start">{customer.phone}</TableCell>
+                  <TableCell className="hidden md:table-cell">{customer.email || "-"}</TableCell>
+                  <TableCell className="text-center">
                     <Badge variant="secondary">{customer.totalOrders || 0}</Badge>
                   </TableCell>
                   <TableCell>
-                    {customer.totalSpent || "0"} {language === "ar" ? "ريال" : "SAR"}
+                    {parseFloat(customer.totalSpent || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden sm:table-cell">
                     {customer.lastOrderAt
-                      ? new Date(customer.lastOrderAt).toLocaleDateString()
+                      ? new Date(customer.lastOrderAt).toLocaleDateString(language === "ar" ? "ar-SA" : "en-US")
                       : "-"}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-center gap-1">
                       <Button
                         variant="ghost"
                         size="icon"
@@ -233,10 +281,18 @@ export default function CustomersPage() {
           </Table>
         </Card>
       ) : (
-        <Card className="p-8">
-          <p className="text-center text-muted-foreground">
-            {t("noCustomers") || (language === "ar" ? "لا يوجد عملاء" : "No customers found")}
+        <Card className="p-12 text-center">
+          <Users className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+          <h3 className="text-lg font-medium mb-2">
+            {language === "ar" ? "لا يوجد عملاء" : "No customers found"}
+          </h3>
+          <p className="text-muted-foreground mb-4">
+            {language === "ar" ? "ابدأ بإضافة عملاء لتتبع طلباتهم" : "Start adding customers to track their orders"}
           </p>
+          <Button onClick={openAddDialog}>
+            <Plus className="w-4 h-4 ltr:mr-2 rtl:ml-2" />
+            {language === "ar" ? "إضافة عميل" : "Add Customer"}
+          </Button>
         </Card>
       )}
 
@@ -254,8 +310,8 @@ export default function CustomersPage() {
           <DialogHeader>
             <DialogTitle>
               {editingCustomer
-                ? (t("editCustomer") || (language === "ar" ? "تعديل عميل" : "Edit Customer"))
-                : (t("addCustomer") || (language === "ar" ? "إضافة عميل" : "Add Customer"))}
+                ? (language === "ar" ? "تعديل عميل" : "Edit Customer")
+                : (language === "ar" ? "إضافة عميل" : "Add Customer")}
             </DialogTitle>
           </DialogHeader>
           <Form {...form}>
@@ -265,7 +321,7 @@ export default function CustomersPage() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("name")}</FormLabel>
+                    <FormLabel>{language === "ar" ? "الاسم" : "Name"}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -278,7 +334,7 @@ export default function CustomersPage() {
                 name="phone"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("customerPhone") || (language === "ar" ? "رقم الهاتف" : "Phone Number")}</FormLabel>
+                    <FormLabel>{language === "ar" ? "رقم الهاتف" : "Phone Number"} *</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -291,7 +347,7 @@ export default function CustomersPage() {
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("email")}</FormLabel>
+                    <FormLabel>{language === "ar" ? "البريد الإلكتروني" : "Email"}</FormLabel>
                     <FormControl>
                       <Input {...field} type="email" />
                     </FormControl>
@@ -304,7 +360,7 @@ export default function CustomersPage() {
                 name="address"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("address")}</FormLabel>
+                    <FormLabel>{language === "ar" ? "العنوان" : "Address"}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -317,7 +373,7 @@ export default function CustomersPage() {
                 name="notes"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t("notes")}</FormLabel>
+                    <FormLabel>{language === "ar" ? "ملاحظات" : "Notes"}</FormLabel>
                     <FormControl>
                       <Textarea {...field} />
                     </FormControl>
@@ -344,15 +400,15 @@ export default function CustomersPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {t("deleteCustomer") || (language === "ar" ? "حذف عميل" : "Delete Customer")}
+              {language === "ar" ? "حذف عميل" : "Delete Customer"}
             </DialogTitle>
           </DialogHeader>
           <p className="text-muted-foreground">
-            {t("confirmDeleteCustomer") || (language === "ar" ? "هل أنت متأكد من حذف هذا العميل؟" : "Are you sure you want to delete this customer?")}
+            {language === "ar" ? "هل أنت متأكد من حذف هذا العميل؟" : "Are you sure you want to delete this customer?"}
           </p>
           <div className="flex justify-end gap-2 mt-4">
             <Button variant="outline" onClick={() => setDeletingCustomer(null)}>
-              {t("cancel")}
+              {language === "ar" ? "إلغاء" : "Cancel"}
             </Button>
             <Button
               variant="destructive"
@@ -365,7 +421,7 @@ export default function CustomersPage() {
             >
               {deleteMutation.isPending
                 ? (language === "ar" ? "جاري الحذف..." : "Deleting...")
-                : t("delete")}
+                : (language === "ar" ? "حذف" : "Delete")}
             </Button>
           </div>
         </DialogContent>

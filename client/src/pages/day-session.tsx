@@ -3,7 +3,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   Calendar, Clock, DollarSign, TrendingUp, TrendingDown, 
   ArrowUpCircle, ArrowDownCircle, Settings, Play, Square,
-  Wallet, CreditCard, Receipt, AlertTriangle, CheckCircle, Plus, History
+  Wallet, CreditCard, Receipt, AlertTriangle, CheckCircle, Plus, History,
+  Truck, Store, Loader2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -64,6 +66,8 @@ export default function DaySessionPage() {
   const [transactionType, setTransactionType] = useState<"deposit" | "withdrawal">("deposit");
   const [transactionAmount, setTransactionAmount] = useState("");
   const [transactionReason, setTransactionReason] = useState("");
+  const [platformToggles, setPlatformToggles] = useState<Record<string, boolean>>({});
+  const [togglingPlatform, setTogglingPlatform] = useState<string | null>(null);
 
   // Get current session
   const { data: currentSession, isLoading: sessionLoading } = useQuery<DaySession | null>({
@@ -87,6 +91,118 @@ export default function DaySessionPage() {
     queryKey: [`/api/orders${branchParam}`],
   });
 
+  // Get delivery integrations
+  const branchIntParam = selectedBranchId ? `?branchId=${selectedBranchId}` : "";
+  const { data: deliveryIntegrations } = useQuery<any[]>({
+    queryKey: [`/api/delivery/integrations${branchIntParam}`],
+  });
+
+  // Get delivery orders for today
+  const { data: deliveryOrders } = useQuery<any[]>({
+    queryKey: [`/api/delivery/orders${branchIntParam}`],
+  });
+
+  const todayDeliveryOrders = deliveryOrders?.filter(o => {
+    const orderDate = new Date(o.createdAt!).toDateString();
+    const today = new Date().toDateString();
+    return orderDate === today;
+  }) || [];
+
+  // Compute delivery stats by platform
+  const deliveryStats = (() => {
+    const stats: Record<string, { count: number; total: number; accepted: number; cancelled: number }> = {};
+    todayDeliveryOrders.forEach(o => {
+      const platform = o.platform || 'unknown';
+      if (!stats[platform]) stats[platform] = { count: 0, total: 0, accepted: 0, cancelled: 0 };
+      stats[platform].count++;
+      stats[platform].total += parseFloat(o.total || "0");
+      if (o.platformStatus === 'accepted' || o.platformStatus === 'preparing' || o.platformStatus === 'ready' || o.platformStatus === 'picked_up' || o.platformStatus === 'delivered') {
+        stats[platform].accepted++;
+      }
+      if (o.platformStatus === 'cancelled' || o.platformStatus === 'rejected') {
+        stats[platform].cancelled++;
+      }
+    });
+    return stats;
+  })();
+
+  const totalDeliveryCount = todayDeliveryOrders.length;
+  const totalDeliveryAmount = todayDeliveryOrders.reduce((sum, o) => sum + parseFloat(o.total || "0"), 0);
+
+  // Platform display names and colors
+  const platformInfo: Record<string, { name: string; nameAr: string; color: string; bgColor: string; logo: string }> = {
+    hungerstation: { name: 'HungerStation', nameAr: 'هنقرستيشن', color: '#FF5A00', bgColor: '#FF5A00', logo: '/platforms/hungerstation.png' },
+    jahez: { name: 'Jahez', nameAr: 'جاهز', color: '#8BC34A', bgColor: '#8BC34A', logo: '/platforms/jahez.png' },
+    keeta: { name: 'Keeta', nameAr: 'كيتا', color: '#FFD600', bgColor: '#FFD600', logo: '/platforms/keeta.png' },
+    ninja: { name: 'Ninja', nameAr: 'نينجا', color: '#E91E63', bgColor: '#E91E63', logo: '/platforms/ninja.png' },
+  };
+
+  // Platform logo component - uses actual app icon with fallback to styled letter
+  const PlatformLogo = ({ platform, size = 36 }: { platform: string; size?: number }) => {
+    const info = platformInfo[platform];
+    const radius = size > 24 ? 10 : 6;
+    const [imgError, setImgError] = useState(false);
+    if (!info) return <div style={{ width: size, height: size, borderRadius: radius, background: '#999', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold', fontSize: size * 0.45 }}>?</div>;
+    
+    if (imgError) {
+      return (
+        <div style={{
+          width: size,
+          height: size,
+          borderRadius: radius,
+          background: info.bgColor,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#fff',
+          fontWeight: 'bold',
+          fontSize: size * 0.45,
+          boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+          flexShrink: 0,
+        }}>
+          {info.name.charAt(0)}
+        </div>
+      );
+    }
+    
+    return (
+      <img
+        src={info.logo}
+        alt={info.name}
+        onError={() => setImgError(true)}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: radius,
+          objectFit: 'cover',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+          flexShrink: 0,
+        }}
+      />
+    );
+  };
+
+  // Toggle outlet status for a delivery platform
+  const togglePlatformStatus = async (integrationId: string, platform: string, newStatus: string) => {
+    setTogglingPlatform(integrationId);
+    try {
+      await apiRequest("PUT", `/api/delivery/integrations/${integrationId}/status`, { status: newStatus });
+      queryClient.invalidateQueries({ queryKey: [`/api/delivery/integrations${branchIntParam}`] });
+      toast({
+        title: language === "ar" 
+          ? `تم ${newStatus === 'open' ? 'فتح' : 'إغلاق'} ${platformInfo[platform]?.nameAr || platform}`
+          : `${platformInfo[platform]?.name || platform} ${newStatus === 'open' ? 'opened' : 'closed'}`,
+      });
+    } catch (error: any) {
+      toast({
+        title: language === "ar" ? "خطأ" : "Error",
+        description: error?.message || "Failed",
+        variant: "destructive",
+      });
+    }
+    setTogglingPlatform(null);
+  };
+
   const todayOrders = orders?.filter(o => {
     const orderDate = new Date(o.createdAt!).toDateString();
     const today = new Date().toDateString();
@@ -106,8 +222,7 @@ export default function DaySessionPage() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions/current`] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/day-sessions") });
       toast({ title: language === "ar" ? "تم بدء اليوم بنجاح" : "Day started successfully" });
       setOpenDialogOpen(false);
       setOpeningBalance("");
@@ -130,8 +245,7 @@ export default function DaySessionPage() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/day-sessions/current`] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/day-sessions") });
       toast({ title: language === "ar" ? "تم إنهاء اليوم بنجاح" : "Day ended successfully" });
       setCloseDialogOpen(false);
       setClosingBalance("");
@@ -322,6 +436,76 @@ export default function DaySessionPage() {
             </Card>
           </div>
 
+          {/* Delivery Platforms Status */}
+          {deliveryIntegrations && deliveryIntegrations.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Truck className="h-5 w-5" />
+                  {language === "ar" ? "تطبيقات التوصيل" : "Delivery Platforms"}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                  {deliveryIntegrations.filter(i => i.isActive).map((integration) => {
+                    const info = platformInfo[integration.platform] || { name: integration.platform, nameAr: integration.platform, color: '#666', bgColor: '#999', letter: '?' };
+                    const isOpen = integration.outletStatus === 'open';
+                    const platformDeliveryStats = deliveryStats[integration.platform];
+                    return (
+                      <div
+                        key={integration.id}
+                        className={`flex items-center justify-between p-3 rounded-lg border-2 transition-colors ${
+                          isOpen ? 'border-green-300 bg-green-50 dark:bg-green-950/30 dark:border-green-800' : 'border-gray-200 bg-gray-50 dark:bg-gray-900 dark:border-gray-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <PlatformLogo platform={integration.platform} size={36} />
+                          <div>
+                            <div className="font-semibold text-sm">
+                              {language === "ar" ? info.nameAr : info.name}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {isOpen 
+                                ? (language === "ar" ? "مفتوح" : "Open")
+                                : (language === "ar" ? "مغلق" : "Closed")
+                              }
+                              {platformDeliveryStats && (
+                                <span className="mx-1">• {platformDeliveryStats.count} {language === "ar" ? "طلب" : "orders"}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {togglingPlatform === integration.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Switch
+                              checked={isOpen}
+                              onCheckedChange={(checked) => 
+                                togglePlatformStatus(integration.id, integration.platform, checked ? 'open' : 'closed')
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Delivery Summary */}
+                {totalDeliveryCount > 0 && (
+                  <div className="mt-3 pt-3 border-t flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">
+                      {language === "ar" ? "إجمالي طلبات التوصيل" : "Total Delivery Orders"}: <strong>{totalDeliveryCount}</strong>
+                    </span>
+                    <span className="font-semibold text-orange-600">
+                      {formatCurrency(totalDeliveryAmount)}
+                    </span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {/* Transactions */}
           <Card>
             <CardHeader>
@@ -475,6 +659,53 @@ export default function DaySessionPage() {
                 onChange={(e) => setOpeningBalance(e.target.value)}
               />
             </div>
+
+            {/* Delivery Platforms */}
+            {deliveryIntegrations && deliveryIntegrations.filter(i => i.isActive).length > 0 && (
+              <div>
+                <Label className="flex items-center gap-2 mb-3">
+                  <Truck className="h-4 w-4" />
+                  {language === "ar" ? "تطبيقات التوصيل" : "Delivery Platforms"}
+                </Label>
+                <div className="space-y-2">
+                  {deliveryIntegrations.filter(i => i.isActive).map((integration) => {
+                    const info = platformInfo[integration.platform] || { name: integration.platform, nameAr: integration.platform, color: '#666', bgColor: '#999', letter: '?' };
+                    const isOpen = integration.outletStatus === 'open';
+                    return (
+                      <div
+                        key={integration.id}
+                        className={`flex items-center justify-between p-3 rounded-lg border ${
+                          isOpen ? 'border-green-300 bg-green-50 dark:bg-green-950/30' : 'border-gray-200 bg-gray-50 dark:bg-gray-900'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <PlatformLogo platform={integration.platform} size={28} />
+                          <span className="font-medium text-sm">{language === "ar" ? info.nameAr : info.name}</span>
+                          <Badge variant={isOpen ? "default" : "secondary"} className="text-xs">
+                            {isOpen ? (language === "ar" ? "مفتوح" : "Open") : (language === "ar" ? "مغلق" : "Closed")}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {togglingPlatform === integration.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Switch
+                              checked={isOpen}
+                              onCheckedChange={(checked) => 
+                                togglePlatformStatus(integration.id, integration.platform, checked ? 'open' : 'closed')
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  {language === "ar" ? "فعّل التطبيقات لاستقبال طلبات التوصيل" : "Enable platforms to receive delivery orders"}
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpenDialogOpen(false)}>
@@ -499,6 +730,7 @@ export default function DaySessionPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {/* Cash Summary */}
             <div className="p-4 bg-muted rounded-lg space-y-2">
               <div className="flex justify-between">
                 <span>{language === "ar" ? "الرصيد الافتتاحي" : "Opening Balance"}</span>
@@ -513,6 +745,41 @@ export default function DaySessionPage() {
                 <span>{formatCurrency(expectedBalance)}</span>
               </div>
             </div>
+
+            {/* Delivery Orders Breakdown */}
+            {totalDeliveryCount > 0 && (
+              <div className="p-4 bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-800 rounded-lg space-y-2">
+                <div className="flex items-center gap-2 font-semibold text-sm mb-2">
+                  <Truck className="h-4 w-4 text-orange-600" />
+                  {language === "ar" ? "طلبات التوصيل" : "Delivery Orders"}
+                </div>
+                {Object.entries(deliveryStats).map(([platform, stats]) => {
+                  const info = platformInfo[platform] || { name: platform, nameAr: platform };
+                  return (
+                    <div key={platform} className="flex justify-between items-center text-sm">
+                      <div className="flex items-center gap-2">
+                        <PlatformLogo platform={platform} size={20} />
+                        <span>{language === "ar" ? info.nameAr : info.name}</span>
+                        <Badge variant="outline" className="text-xs">
+                          {stats.count} {language === "ar" ? "طلب" : "orders"}
+                        </Badge>
+                        {stats.cancelled > 0 && (
+                          <Badge variant="destructive" className="text-xs">
+                            {stats.cancelled} {language === "ar" ? "ملغي" : "cancelled"}
+                          </Badge>
+                        )}
+                      </div>
+                      <span className="font-semibold">{formatCurrency(stats.total)}</span>
+                    </div>
+                  );
+                })}
+                <div className="flex justify-between font-bold border-t border-orange-300 dark:border-orange-700 pt-2 mt-1">
+                  <span>{language === "ar" ? "إجمالي التوصيل" : "Total Delivery"}</span>
+                  <span className="text-orange-600">{formatCurrency(totalDeliveryAmount)}</span>
+                </div>
+              </div>
+            )}
+
             <div>
               <Label>{language === "ar" ? "الرصيد الفعلي" : "Actual Balance"}</Label>
               <Input

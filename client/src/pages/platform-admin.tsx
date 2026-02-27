@@ -64,11 +64,12 @@ import {
   CircleDollarSign,
   Wallet,
   Activity,
+  CheckCircle,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import logoImg from "@assets/logo.jpg";
+
 
 interface RecentOrder {
   id: string;
@@ -100,6 +101,24 @@ interface RestaurantDetail {
   ownerName: string;
   ownerEmail: string;
   ownerPhone: string;
+  // Business fields
+  vatNumber: string | null;
+  commercialRegistration: string | null;
+  postalCode: string | null;
+  buildingNumber: string | null;
+  streetName: string | null;
+  district: string | null;
+  city: string | null;
+  bankName: string | null;
+  bankAccountHolder: string | null;
+  bankAccountNumber: string | null;
+  bankSwift: string | null;
+  bankIban: string | null;
+  taxEnabled: boolean | null;
+  // EdfaPay fields
+  edfapayMerchantId: string | null;
+  edfapayPassword: string | null;
+  edfapaySoftposAuthToken: string | null;
   usersCount: number;
   branchesCount: number;
   ordersCount: number;
@@ -209,6 +228,27 @@ export default function PlatformAdminPage() {
   const [notifPriority, setNotifPriority] = useState("normal");
   const [notifTarget, setNotifTarget] = useState<"all" | "selected">("all");
   const [notifSelectedIds, setNotifSelectedIds] = useState<string[]>([]);
+  const [businessDialog, setBusinessDialog] = useState<RestaurantDetail | null>(null);
+  const [bizOwnerName, setBizOwnerName] = useState("");
+  const [bizOwnerPhone, setBizOwnerPhone] = useState("");
+  const [bizVatNumber, setBizVatNumber] = useState("");
+  const [bizCommercialReg, setBizCommercialReg] = useState("");
+  const [bizBuildingNumber, setBizBuildingNumber] = useState("");
+  const [bizStreetName, setBizStreetName] = useState("");
+  const [bizDistrict, setBizDistrict] = useState("");
+  const [bizCity, setBizCity] = useState("");
+  const [bizPostalCode, setBizPostalCode] = useState("");
+  const [bizBankName, setBizBankName] = useState("");
+  const [bizBankHolder, setBizBankHolder] = useState("");
+  const [bizBankAccount, setBizBankAccount] = useState("");
+  const [bizBankSwift, setBizBankSwift] = useState("");
+  const [bizBankIban, setBizBankIban] = useState("");
+
+  // EdfaPay Payment Settings Dialog
+  const [paymentDialog, setPaymentDialog] = useState<RestaurantDetail | null>(null);
+  const [payMerchantId, setPayMerchantId] = useState("");
+  const [payPassword, setPayPassword] = useState("");
+  const [paySoftposToken, setPaySoftposToken] = useState("");
 
   const { data: stats, isLoading: statsLoading } = useQuery<AdminStats>({
     queryKey: ["/api/admin/stats"],
@@ -278,6 +318,99 @@ export default function PlatformAdminPage() {
       toast({ title: isAr ? "فشل إرسال الإشعار" : "Failed to send notification", variant: "destructive" });
     },
   });
+
+  const updateBusinessMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: any }) => {
+      const res = await apiRequest("PATCH", `/api/admin/restaurant/${id}/business-info`, data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/restaurants"] });
+      setBusinessDialog(null);
+      toast({ title: isAr ? "تم تحديث بيانات المنشأة" : "Business Info Updated" });
+    },
+    onError: () => {
+      toast({ title: isAr ? "حدث خطأ" : "Error occurred", variant: "destructive" });
+    },
+  });
+
+  const updatePaymentMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: any }) => {
+      const res = await apiRequest("PATCH", `/api/admin/restaurant/${id}/payment-settings`, data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/restaurants"] });
+      setPaymentDialog(null);
+      toast({ title: isAr ? "تم تحديث إعدادات الدفع" : "Payment Settings Updated" });
+    },
+    onError: () => {
+      toast({ title: isAr ? "حدث خطأ" : "Error occurred", variant: "destructive" });
+    },
+  });
+
+  const openPaymentDialog = (restaurant: RestaurantDetail) => {
+    setPaymentDialog(restaurant);
+    const r = restaurant as any;
+    setPayMerchantId(r.edfapayMerchantId || "");
+    setPayPassword("");
+    setPaySoftposToken("");
+  };
+
+  const handleSavePaymentSettings = () => {
+    if (!paymentDialog) return;
+    const data: any = {};
+    if (payMerchantId) data.edfapayMerchantId = payMerchantId;
+    if (payPassword) data.edfapayPassword = payPassword;
+    if (paySoftposToken) data.edfapaySoftposAuthToken = paySoftposToken;
+    if (Object.keys(data).length === 0) {
+      toast({ title: isAr ? "لا توجد بيانات للحفظ" : "No data to save", variant: "destructive" });
+      return;
+    }
+    updatePaymentMutation.mutate({ id: paymentDialog.id, data });
+  };
+
+  const openBusinessDialog = (restaurant: RestaurantDetail) => {
+    const r = restaurant as any;
+    setBusinessDialog(restaurant);
+    setBizOwnerName(r.ownerName || "");
+    setBizOwnerPhone(r.ownerPhone || "");
+    setBizVatNumber(r.vatNumber || "");
+    setBizCommercialReg(r.commercialRegistration || "");
+    setBizBuildingNumber(r.buildingNumber || "");
+    setBizStreetName(r.streetName || "");
+    setBizDistrict(r.district || "");
+    setBizCity(r.city || "");
+    setBizPostalCode(r.postalCode || "");
+    setBizBankName(r.bankName || "");
+    setBizBankHolder(r.bankAccountHolder || "");
+    setBizBankAccount(r.bankAccountNumber || "");
+    setBizBankSwift(r.bankSwift || "");
+    setBizBankIban(r.bankIban || "");
+  };
+
+  const handleSaveBusinessInfo = () => {
+    if (!businessDialog) return;
+    updateBusinessMutation.mutate({
+      id: businessDialog.id,
+      data: {
+        ownerName: bizOwnerName,
+        ownerPhone: bizOwnerPhone,
+        vatNumber: bizVatNumber,
+        commercialRegistration: bizCommercialReg,
+        buildingNumber: bizBuildingNumber,
+        streetName: bizStreetName,
+        district: bizDistrict,
+        city: bizCity,
+        postalCode: bizPostalCode,
+        bankName: bizBankName,
+        bankAccountHolder: bizBankHolder,
+        bankAccountNumber: bizBankAccount,
+        bankSwift: bizBankSwift,
+        bankIban: bizBankIban,
+      },
+    });
+  };
 
   const handleSendNotification = () => {
     if (!notifTitle.trim() || !notifMessage.trim()) {
@@ -369,7 +502,7 @@ export default function PlatformAdminPage() {
       <header className="border-b bg-card sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
-            <img src={logoImg} alt="TRYING" className="h-9 w-9 rounded-md object-contain" />
+            <div className="h-9 w-9 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-bold">T</div>
             <div>
               <h1 className="text-lg font-bold text-foreground">
                 {isAr ? "لوحة إدارة المنصة" : "Platform Admin"}
@@ -486,54 +619,27 @@ export default function PlatformAdminPage() {
               </Card>
             </div>
 
-            {/* Stats Row 2 - Breakdowns */}
+            {/* Stats Row 2 - Simplified Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Orders by Status */}
+              {/* Orders Ready */}
               <Card>
                 <CardContent className="p-4">
                   <p className="text-xs font-medium text-muted-foreground mb-3 flex items-center gap-1">
-                    <Activity className="h-3.5 w-3.5" /> {isAr ? "حالة الطلبات" : "Orders by Status"}
+                    <CheckCircle className="h-3.5 w-3.5" /> {isAr ? "جاهز" : "Ready"}
                   </p>
-                  <div className="space-y-2">
-                    {stats?.ordersByStatus && Object.entries(stats.ordersByStatus).map(([status, count]) => (
-                      <div key={status} className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <div className={`h-2 w-2 rounded-full ${
-                            status === "completed" ? "bg-green-500" :
-                            status === "preparing" ? "bg-amber-500" :
-                            status === "pending" ? "bg-blue-500" :
-                            status === "ready" ? "bg-purple-500" :
-                            status === "cancelled" ? "bg-red-500" : "bg-muted-foreground"
-                          }`} />
-                          <span className="text-sm capitalize">{isAr ? statusLabelsAr[status] || status : status}</span>
-                        </div>
-                        <span className="text-sm font-semibold">{count}</span>
-                      </div>
-                    ))}
-                    {(!stats?.ordersByStatus || Object.keys(stats.ordersByStatus).length === 0) && (
-                      <p className="text-sm text-muted-foreground text-center py-2">{isAr ? "لا توجد طلبات" : "No orders yet"}</p>
-                    )}
-                  </div>
+                  <p className="text-2xl font-bold">{stats?.ordersByStatus?.ready || 0}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{isAr ? "طلبات جاهزة للاستلام" : "Orders ready for pickup"}</p>
                 </CardContent>
               </Card>
 
-              {/* Orders by Type */}
+              {/* Local Orders */}
               <Card>
                 <CardContent className="p-4">
                   <p className="text-xs font-medium text-muted-foreground mb-3 flex items-center gap-1">
-                    <Receipt className="h-3.5 w-3.5" /> {isAr ? "أنواع الطلبات" : "Orders by Type"}
+                    <MapPin className="h-3.5 w-3.5" /> {isAr ? "محلي" : "Local"}
                   </p>
-                  <div className="space-y-2">
-                    {stats?.ordersByType && Object.entries(stats.ordersByType).map(([type, count]) => (
-                      <div key={type} className="flex items-center justify-between gap-2">
-                        <span className="text-sm">{isAr ? orderTypeLabelsAr[type] || type : type.replace(/_/g, " ")}</span>
-                        <Badge variant="secondary">{count}</Badge>
-                      </div>
-                    ))}
-                    {(!stats?.ordersByType || Object.keys(stats.ordersByType).length === 0) && (
-                      <p className="text-sm text-muted-foreground text-center py-2">{isAr ? "لا توجد طلبات" : "No orders yet"}</p>
-                    )}
-                  </div>
+                  <p className="text-2xl font-bold">{stats?.ordersByType?.local || 0}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{isAr ? "طلبات محلية" : "Local orders"}</p>
                 </CardContent>
               </Card>
 
@@ -632,6 +738,10 @@ export default function PlatformAdminPage() {
                                   {planOptions.find(p => p.value === restaurant.subscriptionPlan)?.[isAr ? "labelAr" : "labelEn"] || restaurant.subscriptionPlan}
                                 </span>
                               )}
+                              <Badge variant="outline">{isAr ? "الفروع" : "Branches"}: {restaurant.branches.length}</Badge>
+                              <Badge variant={restaurant.edfapayMerchantId && restaurant.edfapaySoftposAuthToken ? "default" : "secondary"}>
+                                {isAr ? "الدفع الإلكتروني" : "Payment"}: {restaurant.edfapayMerchantId && restaurant.edfapaySoftposAuthToken ? (isAr ? "مفعل" : "Enabled") : (isAr ? "غير مفعل" : "Disabled")}
+                              </Badge>
                             </div>
                           </div>
                         </div>
@@ -658,6 +768,28 @@ export default function PlatformAdminPage() {
                               </Badge>
                             )}
                           </div>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openPaymentDialog(restaurant);
+                            }}
+                            title={isAr ? "إعدادات الدفع" : "Payment Settings"}
+                          >
+                            <Wallet className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openBusinessDialog(restaurant);
+                            }}
+                            title={isAr ? "تعديل بيانات المنشأة" : "Edit Business Info"}
+                          >
+                            <Receipt className="h-4 w-4" />
+                          </Button>
                           <Button
                             size="icon"
                             variant="ghost"
@@ -718,7 +850,7 @@ export default function PlatformAdminPage() {
                             </div>
                             <div className="border rounded-md p-3 bg-background text-center">
                               <p className="text-lg font-bold">{restaurant.menuItemsCount}</p>
-                              <p className="text-xs text-muted-foreground">{isAr ? "أصناف القائمة" : "Menu Items"}</p>
+                              <p className="text-xs text-muted-foreground">{isAr ? "أصناف المنيو" : "Menu Items"}</p>
                             </div>
                           </div>
 
@@ -782,6 +914,80 @@ export default function PlatformAdminPage() {
                                   {restaurant.subscriptionNotes}
                                 </p>
                               )}
+                            </div>
+                          </div>
+
+                          {/* Business Info Row */}
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">
+                                {isAr ? "السجل التجاري والضريبة" : "CR & Tax"}
+                              </p>
+                              {restaurant.commercialRegistration ? (
+                                <p className="text-sm">{isAr ? "سجل تجاري:" : "CR:"} {restaurant.commercialRegistration}</p>
+                              ) : (
+                                <p className="text-xs text-muted-foreground">{isAr ? "لم يُدخل" : "Not set"}</p>
+                              )}
+                              {restaurant.vatNumber && (
+                                <p className="text-sm">{isAr ? "ضريبي:" : "VAT:"} {restaurant.vatNumber}</p>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">
+                                {isAr ? "العنوان التفصيلي" : "Detailed Address"}
+                              </p>
+                              {restaurant.streetName || restaurant.district || restaurant.city ? (
+                                <p className="text-sm">
+                                  {[restaurant.buildingNumber, restaurant.streetName, restaurant.district, restaurant.city, restaurant.postalCode].filter(Boolean).join(", ")}
+                                </p>
+                              ) : (
+                                <p className="text-xs text-muted-foreground">{isAr ? "لم يُدخل" : "Not set"}</p>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-muted-foreground mb-1">
+                                {isAr ? "الحساب البنكي" : "Bank Account"}
+                              </p>
+                              {restaurant.bankIban ? (
+                                <>
+                                  <p className="text-sm">{restaurant.bankName} - {restaurant.bankAccountHolder}</p>
+                                  <p className="text-xs text-muted-foreground font-mono">{restaurant.bankIban}</p>
+                                </>
+                              ) : (
+                                <p className="text-xs text-muted-foreground">{isAr ? "لم يُدخل" : "Not set"}</p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Payment Status Row */}
+                          <div className="border rounded-md p-3 bg-background">
+                            <div className="flex items-center justify-between flex-wrap gap-2">
+                              <div className="flex items-center gap-3">
+                                <Wallet className="h-4 w-4 text-muted-foreground" />
+                                <p className="text-xs font-medium text-muted-foreground">
+                                  {isAr ? "بوابة الدفع (EdfaPay)" : "Payment Gateway (EdfaPay)"}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Badge variant={restaurant.edfapayMerchantId && restaurant.edfapayPassword ? "default" : "secondary"}>
+                                  💳 {restaurant.edfapayMerchantId && restaurant.edfapayPassword
+                                    ? (isAr ? "ويب مفعّل" : "Web Active")
+                                    : (isAr ? "ويب غير مفعّل" : "Web Inactive")}
+                                </Badge>
+                                <Badge variant={restaurant.edfapaySoftposAuthToken ? "default" : "secondary"}>
+                                  📱 {restaurant.edfapaySoftposAuthToken
+                                    ? (isAr ? "NFC مفعّل" : "NFC Active")
+                                    : (isAr ? "NFC غير مفعّل" : "NFC Inactive")}
+                                </Badge>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => openPaymentDialog(restaurant)}
+                                >
+                                  <CreditCard className="h-3.5 w-3.5 me-1" />
+                                  {isAr ? "تعديل" : "Edit"}
+                                </Button>
+                              </div>
                             </div>
                           </div>
 
@@ -1203,6 +1409,192 @@ export default function PlatformAdminPage() {
                 : (isAr ? "إرسال" : "Send")}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Business Info Edit Dialog */}
+      <Dialog open={!!businessDialog} onOpenChange={(o) => !o && setBusinessDialog(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          {businessDialog && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Receipt className="h-5 w-5" />
+                  {isAr ? "تعديل بيانات المنشأة" : "Edit Business Info"}
+                </DialogTitle>
+                <p className="text-sm text-muted-foreground">
+                  {isAr ? businessDialog.nameAr : businessDialog.nameEn}
+                </p>
+              </DialogHeader>
+
+              <div className="space-y-5 mt-2">
+                {/* Owner Info */}
+                <div>
+                  <p className="text-sm font-semibold mb-3 border-b pb-1">{isAr ? "بيانات المالك" : "Owner Info"}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label>{isAr ? "اسم المالك" : "Owner Name"}</Label>
+                      <Input value={bizOwnerName} onChange={(e) => setBizOwnerName(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "جوال المالك" : "Owner Phone"}</Label>
+                      <Input value={bizOwnerPhone} onChange={(e) => setBizOwnerPhone(e.target.value)} type="tel" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Tax & CR */}
+                <div>
+                  <p className="text-sm font-semibold mb-3 border-b pb-1">{isAr ? "الضريبة والسجل التجاري" : "Tax & Commercial Registration"}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label>{isAr ? "الرقم الضريبي" : "VAT Number"}</Label>
+                      <Input value={bizVatNumber} onChange={(e) => setBizVatNumber(e.target.value)} placeholder="3XXXXXXXXXX0003" />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "السجل التجاري" : "Commercial Registration"}</Label>
+                      <Input value={bizCommercialReg} onChange={(e) => setBizCommercialReg(e.target.value)} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Address */}
+                <div>
+                  <p className="text-sm font-semibold mb-3 border-b pb-1">{isAr ? "العنوان" : "Address"}</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <Label>{isAr ? "رقم المبنى" : "Building No."}</Label>
+                      <Input value={bizBuildingNumber} onChange={(e) => setBizBuildingNumber(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "الشارع" : "Street"}</Label>
+                      <Input value={bizStreetName} onChange={(e) => setBizStreetName(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "الحي" : "District"}</Label>
+                      <Input value={bizDistrict} onChange={(e) => setBizDistrict(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "الرمز البريدي" : "Postal Code"}</Label>
+                      <Input value={bizPostalCode} onChange={(e) => setBizPostalCode(e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <Label>{isAr ? "المدينة" : "City"}</Label>
+                    <Input value={bizCity} onChange={(e) => setBizCity(e.target.value)} />
+                  </div>
+                </div>
+
+                {/* Bank Details */}
+                <div>
+                  <p className="text-sm font-semibold mb-3 border-b pb-1">{isAr ? "البيانات البنكية" : "Bank Details"}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label>{isAr ? "اسم صاحب الحساب" : "Account Holder"}</Label>
+                      <Input value={bizBankHolder} onChange={(e) => setBizBankHolder(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "اسم البنك" : "Bank Name"}</Label>
+                      <Input value={bizBankName} onChange={(e) => setBizBankName(e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                    <div>
+                      <Label>{isAr ? "رقم الحساب" : "Account Number"}</Label>
+                      <Input value={bizBankAccount} onChange={(e) => setBizBankAccount(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "رمز السويفت" : "SWIFT"}</Label>
+                      <Input value={bizBankSwift} onChange={(e) => setBizBankSwift(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label>{isAr ? "الآيبان" : "IBAN"}</Label>
+                      <Input value={bizBankIban} onChange={(e) => setBizBankIban(e.target.value)} placeholder="SA..." />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <DialogFooter className="gap-2 mt-4">
+                <Button variant="outline" onClick={() => setBusinessDialog(null)}>
+                  {isAr ? "إلغاء" : "Cancel"}
+                </Button>
+                <Button onClick={handleSaveBusinessInfo} disabled={updateBusinessMutation.isPending}>
+                  {updateBusinessMutation.isPending
+                    ? (isAr ? "جاري الحفظ..." : "Saving...")
+                    : (isAr ? "حفظ" : "Save")}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* EdfaPay Payment Settings Dialog */}
+      <Dialog open={!!paymentDialog} onOpenChange={(o) => !o && setPaymentDialog(null)}>
+        <DialogContent className="max-w-md">
+          {paymentDialog && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Wallet className="h-5 w-5" />
+                  {isAr ? "إعدادات الدفع - أدفع باي" : "Payment Settings - EdfaPay"}
+                </DialogTitle>
+                <p className="text-sm text-muted-foreground">
+                  {isAr ? paymentDialog.nameAr : paymentDialog.nameEn}
+                </p>
+              </DialogHeader>
+
+              <div className="space-y-4 mt-2">
+                <div>
+                  <Label>Merchant ID (CLIENT_KEY)</Label>
+                  <Input
+                    value={payMerchantId}
+                    onChange={(e) => setPayMerchantId(e.target.value)}
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    dir="ltr"
+                    className="font-mono text-sm"
+                  />
+                </div>
+                <div>
+                  <Label>Password</Label>
+                  <Input
+                    value={payPassword}
+                    onChange={(e) => setPayPassword(e.target.value)}
+                    type="password"
+                    dir="ltr"
+                    className="font-mono text-sm"
+                    placeholder={isAr ? "اترك فارغ إذا ما تبي تغيّر" : "Leave empty to keep current"}
+                  />
+                </div>
+                <div className="pt-3 border-t">
+                  <Label className="flex items-center gap-2 mb-2">📱 SoftPOS Auth Token (NFC)</Label>
+                  <Input
+                    value={paySoftposToken}
+                    onChange={(e) => setPaySoftposToken(e.target.value)}
+                    type="password"
+                    dir="ltr"
+                    className="font-mono text-sm"
+                    placeholder={isAr ? "من لوحة تحكم EdfaPay Partner" : "From EdfaPay Partner Portal"}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {isAr ? "خاص بتطبيق الموبايل — كل مطعم له توكن مختلف" : "For mobile app — each restaurant has a unique token"}
+                  </p>
+                </div>
+              </div>
+
+              <DialogFooter className="gap-2 mt-4">
+                <Button variant="outline" onClick={() => setPaymentDialog(null)}>
+                  {isAr ? "إلغاء" : "Cancel"}
+                </Button>
+                <Button onClick={handleSavePaymentSettings} disabled={updatePaymentMutation.isPending}>
+                  {updatePaymentMutation.isPending
+                    ? (isAr ? "جاري الحفظ..." : "Saving...")
+                    : (isAr ? "حفظ إعدادات الدفع" : "Save Payment Settings")}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

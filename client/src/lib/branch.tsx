@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from "react
 import { useQuery } from "@tanstack/react-query";
 import type { Branch } from "@shared/schema";
 import { useAuth } from "@/lib/auth";
+import { queryClient } from "@/lib/queryClient";
 
 interface BranchContextType {
   branches: Branch[];
@@ -76,6 +77,8 @@ export function BranchProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(STORAGE_KEY);
       setBranchInUrl(null);
     }
+    // Invalidate all cached queries so they refetch with the new branch context
+    queryClient.invalidateQueries();
   };
 
   return (

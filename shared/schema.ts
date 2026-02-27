@@ -61,9 +61,11 @@ export const restaurants = pgTable("restaurants", {
   taxEnabled: boolean("tax_enabled").default(true),
   taxRate: decimal("tax_rate", { precision: 5, scale: 2 }).default("15.00"),
   autoPrintInvoice: boolean("auto_print_invoice").default(false),
+  // EdfaPay payment gateway credentials
+  edfapayMerchantId: text("edfapay_merchant_id"),   // CLIENT_KEY (UUID)
+  edfapayPassword: text("edfapay_password"),         // PASSWORD for hash
+  edfapaySoftposAuthToken: text("edfapay_softpos_auth_token"), // SoftPOS SDK auth token (NFC tap-to-pay)
   // ZATCA device registration
-  moyasarPublishableKey: text("moyasar_publishable_key"),
-  moyasarSecretKey: text("moyasar_secret_key"),
   zatcaDeviceId: text("zatca_device_id"),
   zatcaEnvironment: text("zatca_environment").default("sandbox"), // sandbox, production
   zatcaCertificate: text("zatca_certificate"),
@@ -71,6 +73,7 @@ export const restaurants = pgTable("restaurants", {
   zatcaSecretKey: text("zatca_secret_key"),
   zatcaComplianceCsid: text("zatca_compliance_csid"),
   zatcaProductionCsid: text("zatca_production_csid"),
+  zatcaPrivateKey: text("zatca_private_key"),
   zatcaLastInvoiceHash: text("zatca_last_invoice_hash").default("NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYmVlYTI3OWI5MDRhNjId"),
   zatcaInvoiceCounter: integer("zatca_invoice_counter").default(0),
   isActive: boolean("is_active").default(true),
@@ -94,6 +97,18 @@ export const branches = pgTable("branches", {
   closingTime: text("closing_time"),
   isMain: boolean("is_main").default(false),
   isActive: boolean("is_active").default(true),
+  // ZATCA per-branch fields (each branch is a separate EGS device)
+  zatcaInvoiceCounter: integer("zatca_invoice_counter").default(0),
+  zatcaLastInvoiceHash: text("zatca_last_invoice_hash").default("NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYmVlYTI3OWI5MDRhNjId"),
+  // ZATCA Phase 2: per-branch EGS device registration (CSID)
+  zatcaDeviceId: text("zatca_device_id"),
+  zatcaEnvironment: text("zatca_environment").default("sandbox"),
+  zatcaCertificate: text("zatca_certificate"),
+  zatcaCertificateExpiry: timestamp("zatca_certificate_expiry"),
+  zatcaSecretKey: text("zatca_secret_key"),
+  zatcaComplianceCsid: text("zatca_compliance_csid"),
+  zatcaProductionCsid: text("zatca_production_csid"),
+  zatcaPrivateKey: text("zatca_private_key"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -237,7 +252,8 @@ export const orders = pgTable("orders", {
 export const orderItems = pgTable("order_items", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   orderId: varchar("order_id").references(() => orders.id).notNull(),
-  menuItemId: varchar("menu_item_id").references(() => menuItems.id).notNull(),
+  menuItemId: varchar("menu_item_id").references(() => menuItems.id),
+  itemName: text("item_name"), // For delivery items that don't map to menu items
   quantity: integer("quantity").notNull(),
   unitPrice: decimal("unit_price", { precision: 10, scale: 2 }).notNull(),
   totalPrice: decimal("total_price", { precision: 10, scale: 2 }).notNull(),
@@ -303,93 +319,31 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Moyasar Merchants - for payment gateway onboarding per restaurant
-export const moyasarMerchants = pgTable("moyasar_merchants", {
+// EdfaPay Merchants - payment gateway config per restaurant
+export const edfapayMerchants = pgTable("edfapay_merchants", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
-  moyasarMerchantId: text("moyasar_merchant_id"),
-  moyasarEntityId: text("moyasar_entity_id"),
-  merchantType: text("merchant_type").notNull().default("establishment"),
-  adminEmail: text("admin_email"),
-  email: text("email"),
-  ownersCount: integer("owners_count").default(1),
-  signatory: text("signatory").default("owner"),
-  signatoryCount: integer("signatory_count").default(1),
-  activityLicenseRequired: boolean("activity_license_required").default(false),
+  edfapayMerchantId: text("edfapay_merchant_id"),           // CLIENT_KEY (UUID)
+  edfapayPassword: text("edfapay_password"),                 // PASSWORD for hash
   name: text("name"),
   publicName: text("public_name"),
-  country: text("country").default("SA"),
-  timeZone: text("time_zone").default("Asia/Riyadh"),
-  website: text("website"),
-  statementDescriptor: text("statement_descriptor"),
-  enabledSchemes: text("enabled_schemes").array(),
-  paymentMethods: text("payment_methods").array(),
-  fees: jsonb("fees").$type<{
-    tax_inclusive: boolean;
-    mada_charge_rate: number;
-    mada_charge_fixed: number;
-    mada_refund_rate: number;
-    mada_refund_fixed: number;
-    cc_charge_rate: number;
-    cc_charge_fixed: number;
-    cc_refund_rate: number;
-    cc_refund_fixed: number;
-  }>(),
-  status: text("status").default("draft"),
-  signatureStatus: text("signature_status").default("unsigned"),
-  signatureUrl: text("signature_url"),
-  rejectionReasons: jsonb("rejection_reasons").$type<string[]>(),
-  livePublicKey: text("live_public_key"),
-  liveSecretKey: text("live_secret_key"),
-  testPublicKey: text("test_public_key"),
-  testSecretKey: text("test_secret_key"),
-  requiredDocuments: jsonb("required_documents").$type<string[]>(),
-  uploadedDocuments: jsonb("uploaded_documents").$type<string[]>(),
+  email: text("email"),
+  status: text("status").default("active"),                 // active, inactive
+  paymentMethods: text("payment_methods").array(),           // creditcard, applepay, stcpay
+  notificationUrl: text("notification_url"),                 // Callback URL for EdfaPay
+  isLive: boolean("is_live").default(false),                 // sandbox vs production
+  metadata: jsonb("metadata").$type<Record<string, any>>(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-// Moyasar merchant documents
-export const moyasarDocuments = pgTable("moyasar_documents", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  merchantId: varchar("merchant_id").references(() => moyasarMerchants.id).notNull(),
-  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
-  // Document type
-  documentType: text("document_type").notNull(), // owner_id, signatory_id, bank_iban_certificate, commercial_registration, etc.
-  // Document info fields (varies by type)
-  documentInfo: jsonb("document_info").$type<{
-    id?: string; // National ID number
-    date_of_birth?: string;
-    mobile?: string;
-    holder?: string;
-    iban?: string;
-    number?: string;
-    expiry_date?: string;
-    name?: string;
-    street?: string;
-    district?: string;
-    building_number?: string;
-    secondary_number?: string;
-    postal_code?: string;
-    city?: string;
-    country?: string;
-  }>(),
-  // File data (base64)
-  fileData: text("file_data"),
-  fileName: text("file_name"),
-  fileMimeType: text("file_mime_type"),
-  // Upload status
-  isUploaded: boolean("is_uploaded").default(false),
-  moyasarDocumentId: text("moyasar_document_id"), // ID from Moyasar after upload
-  uploadError: text("upload_error"),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
+
 
 // Invoices for ZATCA compliance
 export const invoices = pgTable("invoices", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  branchId: varchar("branch_id").references(() => branches.id),
   orderId: varchar("order_id").references(() => orders.id).notNull(),
   invoiceNumber: text("invoice_number").notNull(),
   invoiceType: text("invoice_type").default("standard"),
@@ -419,8 +373,25 @@ export const invoices = pgTable("invoices", {
   uuid: text("uuid"),
   csidToken: text("csid_token"),
   signedXml: text("signed_xml"),
+  cashierName: text("cashier_name"),
+  refundReason: text("refund_reason"),
   createdAt: timestamp("created_at").defaultNow(),
   issuedAt: timestamp("issued_at").defaultNow(),
+});
+
+// ===============================
+// INVOICE AUDIT LOG - سجل عمليات الفواتير (غير قابل للحذف)
+// ===============================
+export const invoiceAuditLog = pgTable("invoice_audit_log", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  invoiceId: varchar("invoice_id").references(() => invoices.id),
+  action: text("action").notNull(), // invoice_created, credit_note_created, debit_note_created, invoice_cancelled, refund_issued, tax_settings_changed, invoice_submitted_zatca
+  userId: varchar("user_id").references(() => users.id),
+  userName: text("user_name"),
+  details: text("details"), // JSON string with additional info
+  ipAddress: text("ip_address"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 // ===============================
@@ -430,7 +401,8 @@ export const paymentTransactions = pgTable("payment_transactions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
   orderId: varchar("order_id").references(() => orders.id).notNull(),
-  moyasarPaymentId: text("moyasar_payment_id"),
+  edfapayTransactionId: text("edfapay_transaction_id"),   // trans_id from EdfaPay
+  edfapayGwayId: text("edfapay_gway_id"),                 // public gateway ID
   type: text("type").notNull().default("payment"), // payment, refund
   status: text("status").notNull().default("pending"), // pending, paid, failed, refunded
   amount: integer("amount").notNull(), // in halalas (smallest unit)
@@ -447,41 +419,28 @@ export const paymentTransactions = pgTable("payment_transactions", {
 });
 
 // ===============================
-// MOYASAR INVOICES - فواتير مؤسر (روابط دفع)
+// EDFAPAY INVOICES - فواتير أدفع باي (روابط دفع)
 // ===============================
-export const moyasarInvoices = pgTable("moyasar_invoices", {
+export const edfapayInvoices = pgTable("edfapay_invoices", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
   orderId: varchar("order_id").references(() => orders.id),
-  moyasarInvoiceId: text("moyasar_invoice_id"),
-  status: text("status").default("initiated"), // initiated, paid, expired
-  amount: integer("amount").notNull(), // in halalas
+  edfapayTransactionId: text("edfapay_transaction_id"),
+  edfapayGwayId: text("edfapay_gway_id"),
+  status: text("status").default("initiated"), // initiated, settled, declined, refund
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
   currency: text("currency").default("SAR"),
   description: text("description"),
-  invoiceUrl: text("invoice_url"),
   callbackUrl: text("callback_url"),
   customerName: text("customer_name"),
   customerPhone: text("customer_phone"),
   customerEmail: text("customer_email"),
-  expiredAt: timestamp("expired_at"),
-  paidAt: timestamp("paid_at"),
   metadata: jsonb("metadata").$type<Record<string, any>>(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-// ===============================
-// APPLE PAY DOMAINS
-// ===============================
-export const applePayDomains = pgTable("apple_pay_domains", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
-  merchantId: varchar("merchant_id").references(() => moyasarMerchants.id).notNull(),
-  moyasarDomainId: text("moyasar_domain_id"),
-  host: text("host").notNull(),
-  status: text("status").default("initiated"), // initiated, validated, registered
-  createdAt: timestamp("created_at").defaultNow(),
-});
+
 
 // ===============================
 // 1. RESERVATIONS - نظام الحجوزات
@@ -778,6 +737,72 @@ export const notificationSettings = pgTable("notification_settings", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// ===============================
+// DELIVERY PLATFORM INTEGRATIONS - تكامل منصات التوصيل
+// ===============================
+
+// Delivery integrations - platform credentials per branch
+export const deliveryIntegrations = pgTable("delivery_integrations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  branchId: varchar("branch_id").references(() => branches.id),
+  platform: text("platform").notNull(), // hungerstation, jahez, keeta, ninja
+  chainId: text("chain_id"), // HungerStation chain ID
+  vendorId: text("vendor_id"), // HungerStation vendor ID (branch-level)
+  clientId: text("client_id"), // OAuth client ID
+  clientSecret: text("client_secret"), // OAuth client secret
+  webhookSecret: text("webhook_secret"), // For verifying incoming webhooks
+  accessToken: text("access_token"), // Cached OAuth access token
+  tokenExpiresAt: timestamp("token_expires_at"), // Token expiry
+  isActive: boolean("is_active").default(false),
+  autoAccept: boolean("auto_accept").default(false), // Auto-accept incoming orders
+  outletStatus: text("outlet_status").default("closed"), // open, closed
+  lastSyncAt: timestamp("last_sync_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Delivery orders - orders received from external platforms
+export const deliveryOrders = pgTable("delivery_orders", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  branchId: varchar("branch_id").references(() => branches.id),
+  orderId: varchar("order_id").references(() => orders.id), // Linked POS order (created on accept)
+  integrationId: varchar("integration_id").references(() => deliveryIntegrations.id).notNull(),
+  platform: text("platform").notNull(), // hungerstation, jahez, keeta, ninja
+  externalOrderId: text("external_order_id").notNull(), // Platform's order ID
+  orderCode: text("order_code"), // Short display code (e.g. HS-A1B2)
+  platformStatus: text("platform_status").notNull().default("new"), // new, accepted, preparing, ready, picked_up, delivered, cancelled, rejected
+  transportType: text("transport_type"), // delivery, pickup
+  rawPayload: jsonb("raw_payload"), // Full webhook payload for debugging
+  // Customer info from platform
+  customerName: text("customer_name"),
+  customerPhone: text("customer_phone"),
+  deliveryAddress: text("delivery_address"),
+  deliveryLat: text("delivery_lat"),
+  deliveryLng: text("delivery_lng"),
+  // Order totals from platform
+  subtotal: decimal("subtotal", { precision: 10, scale: 2 }).default("0"),
+  deliveryFee: decimal("delivery_fee", { precision: 10, scale: 2 }).default("0"),
+  discount: decimal("discount", { precision: 10, scale: 2 }).default("0"),
+  total: decimal("total", { precision: 10, scale: 2 }).default("0"),
+  // Items snapshot
+  items: jsonb("items").$type<Array<{ name: string; nameAr?: string; quantity: number; unitPrice: string; totalPrice: string; notes?: string; options?: string[] }>>(),
+  // Timing
+  estimatedDeliveryTime: timestamp("estimated_delivery_time"),
+  acceptedAt: timestamp("accepted_at"),
+  readyAt: timestamp("ready_at"),
+  pickedUpAt: timestamp("picked_up_at"),
+  deliveredAt: timestamp("delivered_at"),
+  cancelledAt: timestamp("cancelled_at"),
+  cancelReason: text("cancel_reason"),
+  // Meta
+  driverName: text("driver_name"),
+  driverPhone: text("driver_phone"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // Insert schemas
 export const insertRestaurantSchema = createInsertSchema(restaurants).omit({ id: true, createdAt: true });
 export const insertBranchSchema = createInsertSchema(branches).omit({ id: true, createdAt: true });
@@ -793,11 +818,11 @@ export const insertInventoryItemSchema = createInsertSchema(inventoryItems).omit
 export const insertInventoryTransactionSchema = createInsertSchema(inventoryTransactions).omit({ id: true, createdAt: true });
 export const insertRecipeSchema = createInsertSchema(recipes).omit({ id: true, createdAt: true });
 export const insertPrinterSchema = createInsertSchema(printers).omit({ id: true, createdAt: true });
-export const insertMoyasarMerchantSchema = createInsertSchema(moyasarMerchants).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertMoyasarDocumentSchema = createInsertSchema(moyasarDocuments).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertPaymentTransactionSchema = createInsertSchema(paymentTransactions).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertMoyasarInvoiceSchema = createInsertSchema(moyasarInvoices).omit({ id: true, createdAt: true, updatedAt: true });
-export const insertApplePayDomainSchema = createInsertSchema(applePayDomains).omit({ id: true, createdAt: true });
+// EdfaPay insert schemas
+export const insertEdfapayMerchantSchema = createInsertSchema(edfapayMerchants).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertEdfapayInvoiceSchema = createInsertSchema(edfapayInvoices).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertInvoiceAuditLogSchema = createInsertSchema(invoiceAuditLog).omit({ id: true, createdAt: true });
 
 // New Insert Schemas for added features
 export const insertReservationSchema = createInsertSchema(reservations).omit({ id: true, createdAt: true, updatedAt: true });
@@ -817,6 +842,10 @@ export const insertNotificationSchema = createInsertSchema(notifications).omit({
 export const insertNotificationSettingsSchema = createInsertSchema(notificationSettings).omit({ id: true, updatedAt: true });
 export const insertReviewSchema = createInsertSchema(reviews).omit({ id: true, createdAt: true });
 export const insertKitchenSectionSchema = createInsertSchema(kitchenSections).omit({ id: true, createdAt: true });
+
+// Delivery Integration Insert Schemas
+export const insertDeliveryIntegrationSchema = createInsertSchema(deliveryIntegrations).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertDeliveryOrderSchema = createInsertSchema(deliveryOrders).omit({ id: true, createdAt: true, updatedAt: true });
 
 // Types
 export type Restaurant = typeof restaurants.$inferSelect;
@@ -847,16 +876,13 @@ export type Recipe = typeof recipes.$inferSelect;
 export type InsertRecipe = z.infer<typeof insertRecipeSchema>;
 export type Printer = typeof printers.$inferSelect;
 export type InsertPrinter = z.infer<typeof insertPrinterSchema>;
-export type MoyasarMerchant = typeof moyasarMerchants.$inferSelect;
-export type InsertMoyasarMerchant = z.infer<typeof insertMoyasarMerchantSchema>;
-export type MoyasarDocument = typeof moyasarDocuments.$inferSelect;
-export type InsertMoyasarDocument = z.infer<typeof insertMoyasarDocumentSchema>;
 export type PaymentTransaction = typeof paymentTransactions.$inferSelect;
 export type InsertPaymentTransaction = z.infer<typeof insertPaymentTransactionSchema>;
-export type MoyasarInvoice = typeof moyasarInvoices.$inferSelect;
-export type InsertMoyasarInvoice = z.infer<typeof insertMoyasarInvoiceSchema>;
-export type ApplePayDomain = typeof applePayDomains.$inferSelect;
-export type InsertApplePayDomain = z.infer<typeof insertApplePayDomainSchema>;
+// EdfaPay types
+export type EdfapayMerchant = typeof edfapayMerchants.$inferSelect;
+export type InsertEdfapayMerchant = z.infer<typeof insertEdfapayMerchantSchema>;
+export type EdfapayInvoice = typeof edfapayInvoices.$inferSelect;
+export type InsertEdfapayInvoice = z.infer<typeof insertEdfapayInvoiceSchema>;
 
 // New Types for added features
 export type Reservation = typeof reservations.$inferSelect;
@@ -893,6 +919,14 @@ export type Review = typeof reviews.$inferSelect;
 export type InsertReview = z.infer<typeof insertReviewSchema>;
 export type KitchenSection = typeof kitchenSections.$inferSelect;
 export type InsertKitchenSection = z.infer<typeof insertKitchenSectionSchema>;
+export type InvoiceAuditLog = typeof invoiceAuditLog.$inferSelect;
+export type InsertInvoiceAuditLog = z.infer<typeof insertInvoiceAuditLogSchema>;
+
+// Delivery Integration Types
+export type DeliveryIntegration = typeof deliveryIntegrations.$inferSelect;
+export type InsertDeliveryIntegration = z.infer<typeof insertDeliveryIntegrationSchema>;
+export type DeliveryOrder = typeof deliveryOrders.$inferSelect;
+export type InsertDeliveryOrder = z.infer<typeof insertDeliveryOrderSchema>;
 
 // Extended types for frontend
 export type OrderWithItems = Order & { items: (OrderItem & { menuItem: MenuItem })[] };
@@ -930,14 +964,7 @@ export const cashTransactionTypes = ["deposit", "withdrawal", "adjustment"] as c
 export const notificationTypes = ["order", "kitchen", "inventory", "reservation", "queue", "system"] as const;
 export const notificationPriorities = ["low", "normal", "high", "urgent"] as const;
 
-// Moyasar enums
-export const merchantTypes = ["freelancer", "establishment", "company", "foreign_company"] as const;
-export const signatoryTypes = ["owner", "commercial_contract", "power_of_attorney"] as const;
-export const merchantStatuses = ["draft", "pending", "active", "missing_docs", "rejected", "hold"] as const;
-export const signatureStatuses = ["unsigned", "initiated", "signed", "rejected"] as const;
-export const moyasarDocumentTypes = [
-  "owner_id", "signatory_id", "bank_iban_certificate", "commercial_registration",
-  "company_address", "owner_address", "signatory_address", "vat_certificate",
-  "activity_license", "freelance_certificate", "investment_license", "power_of_attorney", "other"
-] as const;
-export const paymentSchemes = ["mada", "visa", "master"] as const;
+// Delivery platform enums
+export const deliveryPlatforms = ["hungerstation", "jahez", "keeta", "ninja"] as const;
+export const deliveryOrderStatuses = ["new", "accepted", "preparing", "ready", "picked_up", "delivered", "cancelled", "rejected"] as const;
+export const outletStatuses = ["open", "closed"] as const;

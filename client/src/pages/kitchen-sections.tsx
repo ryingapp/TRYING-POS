@@ -56,7 +56,7 @@ export default function KitchenSectionsPage() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/kitchen-sections"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/kitchen-sections") });
       toast({
         title: language === "ar" ? "تم الإضافة" : "Section Added",
         description: language === "ar" ? "تم إضافة القسم بنجاح" : "Kitchen section added successfully",
@@ -80,7 +80,7 @@ export default function KitchenSectionsPage() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/kitchen-sections"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/kitchen-sections") });
       toast({
         title: language === "ar" ? "تم التحديث" : "Section Updated",
         description: language === "ar" ? "تم تحديث القسم بنجاح" : "Kitchen section updated successfully",
@@ -101,7 +101,7 @@ export default function KitchenSectionsPage() {
       return apiRequest("DELETE", `/api/kitchen-sections/${id}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/kitchen-sections"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/kitchen-sections") });
       toast({
         title: language === "ar" ? "تم الحذف" : "Section Deleted",
         description: language === "ar" ? "تم حذف القسم بنجاح" : "Kitchen section deleted successfully",

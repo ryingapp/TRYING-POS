@@ -1,30 +1,18 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Loader2, CreditCard, Smartphone, Wallet, ShieldCheck, Lock } from "lucide-react";
+import { Loader2, CreditCard, ShieldCheck, Lock } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import type { Order } from "@shared/schema";
-
-declare global {
-  interface Window {
-    Moyasar: {
-      init: (config: any) => void;
-    };
-  }
-}
-
-type PaymentMethodType = "creditcard" | "stcpay" | "applepay";
+import ApplePayButton from "@/components/apple-pay-button";
 
 export default function PaymentPage() {
   const { orderId } = useParams<{ orderId: string }>();
   const { language, setLanguage, direction } = useLanguage();
-  const [isFormLoaded, setIsFormLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedMethod, setSelectedMethod] = useState<PaymentMethodType | null>(null);
-  const [sessionData, setSessionData] = useState<any>(null);
-  const formContainerRef = useRef<HTMLDivElement>(null);
-  const formInitialized = useRef(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
 
   const toggleLanguage = () => {
     setLanguage(language === "ar" ? "en" : "ar");
@@ -40,129 +28,56 @@ export default function PaymentPage() {
     enabled: !!orderId,
   });
 
-  // Load Moyasar SDK and session data
+  // Check if order is already paid
   useEffect(() => {
     if (!order) return;
-
-    // Handle already-paid orders
     if (order.isPaid) {
       window.location.href = `/payment-callback/${order.id}?status=paid`;
-      return;
+    } else {
+      setSessionReady(true);
     }
+  }, [order]);
 
-    const baseUrl = window.location.origin;
-    const callbackUrl = `${baseUrl}/payment-callback/${order.id}`;
-
-    const loadSession = async () => {
-      try {
-        const sessionRes = await fetch("/api/payments/create-session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderId: order.id,
-            callbackUrl,
-          }),
-        });
-        if (!sessionRes.ok) throw new Error("Failed to create payment session");
-        const session = await sessionRes.json();
-
-        if (!session.publishableKey || session.publishableKey === "pending_setup") {
-          setError(language === "ar" 
-            ? "بوابة الدفع غير مُعدة بعد. يرجى التواصل مع المطعم."
-            : "Payment gateway not configured yet. Please contact the restaurant.");
-          return;
-        }
-
-        setSessionData(session);
-
-        // Load Moyasar CSS
-        if (!document.querySelector('link[href*="moyasar.css"]')) {
-          const link = document.createElement("link");
-          link.rel = "stylesheet";
-          link.href = "https://cdn.moyasar.com/mpf/1.14.0/moyasar.css";
-          document.head.appendChild(link);
-        }
-
-        // Load Moyasar JS
-        if (!document.querySelector('script[src*="moyasar.js"]')) {
-          const script = document.createElement("script");
-          script.src = "https://cdn.moyasar.com/mpf/1.14.0/moyasar.js";
-          script.onload = () => setIsFormLoaded(true);
-          script.onerror = () => {
-            setError(language === "ar" 
-              ? "فشل تحميل نظام الدفع. يرجى المحاولة مرة أخرى."
-              : "Failed to load payment system. Please try again.");
-          };
-          document.head.appendChild(script);
-        } else if (window.Moyasar) {
-          setIsFormLoaded(true);
-        }
-      } catch (err) {
-        console.error("Payment init error:", err);
-        setError(language === "ar"
-          ? "حدث خطأ أثناء تحميل صفحة الدفع"
-          : "Error loading payment page");
-      }
-    };
-
-    loadSession();
-  }, [order, language]);
-
-  // Initialize Moyasar form when method is selected
-  useEffect(() => {
-    if (!selectedMethod || !sessionData || !isFormLoaded || !formContainerRef.current) return;
-    if (formInitialized.current) return;
-    formInitialized.current = true;
+  // Initiate EdfaPay payment and redirect
+  const handlePayNow = async () => {
+    if (!order || isRedirecting) return;
+    setIsRedirecting(true);
+    setError(null);
 
     try {
-      // Clear existing content
-      if (formContainerRef.current) {
-        formContainerRef.current.innerHTML = "";
+      const baseUrl = window.location.origin;
+      const callbackUrl = `${baseUrl}/payment-callback/${order.id}`;
+
+      const sessionRes = await fetch("/api/payments/create-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          callbackUrl,
+        }),
+      });
+
+      if (!sessionRes.ok) {
+        const errData = await sessionRes.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to create payment session");
       }
 
-      const methods: string[] = [selectedMethod];
-      
-      window.Moyasar.init({
-        element: formContainerRef.current,
-        amount: sessionData.amount,
-        currency: sessionData.currency,
-        description: sessionData.description,
-        publishable_api_key: sessionData.publishableKey,
-        callback_url: sessionData.callbackUrl,
-        methods,
-        supported_networks: ["visa", "mastercard", "mada"],
-        apple_pay: selectedMethod === "applepay" ? {
-          country: "SA",
-          label: sessionData.description || "Payment",
-          validate_merchant_url: "https://api.moyasar.com/v1/applepay/initiate",
-        } : undefined,
-        language: language === "ar" ? "ar" : "en",
-        metadata: {
-          order_id: sessionData.orderId,
-        },
-        on_completed: function (payment: any) {
-          console.log("Payment completed:", payment.id, payment.status);
-        },
-      });
-    } catch (err) {
-      console.error("Moyasar init error:", err);
-      setError(language === "ar"
-        ? "فشل تهيئة نظام الدفع"
-        : "Failed to initialize payment system");
-    }
-  }, [selectedMethod, sessionData, isFormLoaded, language]);
+      const session = await sessionRes.json();
 
-  const handleMethodSelect = (method: PaymentMethodType) => {
-    if (selectedMethod === method) {
-      // Toggle off
-      setSelectedMethod(null);
-      formInitialized.current = false;
-      if (formContainerRef.current) formContainerRef.current.innerHTML = "";
-    } else {
-      // Switch method
-      formInitialized.current = false;
-      if (formContainerRef.current) formContainerRef.current.innerHTML = "";
-      setSelectedMethod(method);
+      if (session.action === "redirect" && session.redirectUrl) {
+        // Redirect to EdfaPay checkout page
+        window.location.href = session.redirectUrl;
+      } else {
+        throw new Error(language === "ar"
+          ? "بوابة الدفع غير مُعدة بعد. يرجى التواصل مع المطعم."
+          : "Payment gateway not configured yet. Please contact the restaurant.");
+      }
+    } catch (err: any) {
+      console.error("Payment init error:", err);
+      setError(err.message || (language === "ar"
+        ? "حدث خطأ أثناء تحميل صفحة الدفع"
+        : "Error loading payment page"));
+      setIsRedirecting(false);
     }
   };
 
@@ -256,73 +171,83 @@ export default function PaymentPage() {
           </div>
         )}
 
-        {/* Loading */}
-        {!isFormLoaded && !error && !sessionData && (
-          <div className="flex flex-col items-center justify-center py-8 gap-2.5">
-            <Loader2 className="h-6 w-6 animate-spin text-[#8B1A1A]" />
-            <p className="text-sm text-gray-400 dark:text-white/40">
-              {language === "ar" ? "جاري تحميل نظام الدفع..." : "Loading payment form..."}
-            </p>
+        {/* Pay Button */}
+        {sessionReady && !error && (
+          <div className="space-y-3">
+            {/* Apple Pay Button — only renders on Safari/iOS with Apple Pay configured */}
+            <ApplePayButton
+              orderId={order.id}
+              amount={amount}
+              label={language === "ar" ? "TryingPOS" : "TryingPOS"}
+              callbackUrl={`${window.location.origin}/payment-callback/${order.id}`}
+              language={language as "ar" | "en"}
+              onSuccess={(result) => {
+                window.location.href = `/payment-callback/${order.id}?status=paid&transId=${result.transId}`;
+              }}
+              onError={(errorMsg) => {
+                setError(errorMsg);
+              }}
+              onRedirect={(url) => {
+                window.location.href = url;
+              }}
+              disabled={isRedirecting}
+            />
+
+            {/* Accepted methods info */}
+            <div className="bg-white dark:bg-white/[0.03] rounded-xl border border-gray-100 dark:border-white/[0.05] p-4">
+              <p className="text-xs font-medium text-gray-400 dark:text-white/30 mb-3 text-center">
+                {language === "ar" ? "طرق الدفع المقبولة" : "Accepted payment methods"}
+              </p>
+              <div className="flex items-center justify-center gap-3 flex-wrap">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-white/[0.04]">
+                  <CreditCard className="h-4 w-4 text-gray-400" />
+                  <span className="text-xs text-gray-500 dark:text-white/50">Visa</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-white/[0.04]">
+                  <CreditCard className="h-4 w-4 text-gray-400" />
+                  <span className="text-xs text-gray-500 dark:text-white/50">Mastercard</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-white/[0.04]">
+                  <CreditCard className="h-4 w-4 text-gray-400" />
+                  <span className="text-xs text-gray-500 dark:text-white/50">mada</span>
+                </div>
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-white/[0.04]">
+                  <svg className="h-4 w-4 text-gray-400" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M17.05 20.28c-.98.95-2.05.88-3.08.4-1.09-.5-2.08-.48-3.24 0-1.44.62-2.2.44-3.06-.4C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
+                  </svg>
+                  <span className="text-xs text-gray-500 dark:text-white/50">Apple Pay</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Pay Now Button */}
+            <button
+              onClick={handlePayNow}
+              disabled={isRedirecting}
+              className="w-full py-4 rounded-xl bg-[#8B1A1A] hover:bg-[#7A1717] active:bg-[#6A1414] text-white font-bold text-base transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {isRedirecting ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  {language === "ar" ? "جاري التحويل لصفحة الدفع..." : "Redirecting to payment..."}
+                </>
+              ) : (
+                <>
+                  <Lock className="h-4 w-4" />
+                  {language === "ar" ? `ادفع ${amount} ر.س` : `Pay ${amount} SAR`}
+                </>
+              )}
+            </button>
           </div>
         )}
 
-        {/* Payment Methods */}
-        {sessionData && !error && (
-          <div className="space-y-3">
-            <p className="text-xs font-medium text-gray-400 dark:text-white/30 px-0.5">
-              {language === "ar" ? "اختر طريقة الدفع" : "Payment method"}
+        {/* Loading state */}
+        {!sessionReady && !error && (
+          <div className="flex flex-col items-center justify-center py-8 gap-2.5">
+            <Loader2 className="h-6 w-6 animate-spin text-[#8B1A1A]" />
+            <p className="text-sm text-gray-400 dark:text-white/40">
+              {language === "ar" ? "جاري تحميل نظام الدفع..." : "Loading payment..."}
             </p>
-
-            {/* Method buttons */}
-            <div className="flex gap-2">
-              <button
-                onClick={() => handleMethodSelect("creditcard")}
-                className={`flex-1 flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
-                  selectedMethod === "creditcard"
-                    ? "border-[#8B1A1A] bg-[#8B1A1A]/5 dark:bg-[#8B1A1A]/10"
-                    : "border-gray-100 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-gray-200 dark:hover:border-white/[0.1]"
-                }`}
-              >
-                <CreditCard className={`h-5 w-5 ${selectedMethod === "creditcard" ? "text-[#8B1A1A]" : "text-gray-400 dark:text-white/30"}`} />
-                <span className={`text-[11px] font-medium ${selectedMethod === "creditcard" ? "text-[#8B1A1A]" : "text-gray-500 dark:text-white/50"}`}>
-                  {language === "ar" ? "بطاقة" : "Card"}
-                </span>
-                <div className="flex items-center gap-1">
-                  <img src="https://cdn.moyasar.com/mpf/1.14.0/visa.svg" alt="" className="h-3" onError={(e) => (e.currentTarget.style.display = 'none')} />
-                  <img src="https://cdn.moyasar.com/mpf/1.14.0/mastercard.svg" alt="" className="h-3" onError={(e) => (e.currentTarget.style.display = 'none')} />
-                  <img src="https://cdn.moyasar.com/mpf/1.14.0/mada.svg" alt="" className="h-3" onError={(e) => (e.currentTarget.style.display = 'none')} />
-                </div>
-              </button>
-              <button
-                onClick={() => handleMethodSelect("stcpay")}
-                className={`flex-1 flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
-                  selectedMethod === "stcpay"
-                    ? "border-[#8B1A1A] bg-[#8B1A1A]/5 dark:bg-[#8B1A1A]/10"
-                    : "border-gray-100 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-gray-200 dark:hover:border-white/[0.1]"
-                }`}
-              >
-                <Smartphone className={`h-5 w-5 ${selectedMethod === "stcpay" ? "text-[#8B1A1A]" : "text-gray-400 dark:text-white/30"}`} />
-                <span className={`text-[11px] font-medium ${selectedMethod === "stcpay" ? "text-[#8B1A1A]" : "text-gray-500 dark:text-white/50"}`}>STC Pay</span>
-              </button>
-              <button
-                onClick={() => handleMethodSelect("applepay")}
-                className={`flex-1 flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border transition-all ${
-                  selectedMethod === "applepay"
-                    ? "border-[#8B1A1A] bg-[#8B1A1A]/5 dark:bg-[#8B1A1A]/10"
-                    : "border-gray-100 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-gray-200 dark:hover:border-white/[0.1]"
-                }`}
-              >
-                <Wallet className={`h-5 w-5 ${selectedMethod === "applepay" ? "text-[#8B1A1A]" : "text-gray-400 dark:text-white/30"}`} />
-                <span className={`text-[11px] font-medium ${selectedMethod === "applepay" ? "text-[#8B1A1A]" : "text-gray-500 dark:text-white/50"}`}>Apple Pay</span>
-              </button>
-            </div>
-
-            {/* Form area */}
-            {selectedMethod && (
-              <div className="bg-white dark:bg-white/[0.03] rounded-xl border border-gray-100 dark:border-white/[0.05] p-4">
-                <div ref={formContainerRef} className="moyasar-form-container" />
-              </div>
-            )}
           </div>
         )}
 
@@ -331,23 +256,11 @@ export default function PaymentPage() {
           <Lock className="h-3 w-3 text-gray-300 dark:text-white/20" />
           <p className="text-[10px] text-gray-300 dark:text-white/20">
             {language === "ar" 
-              ? "الدفع آمن ومشفر عبر بوابة مؤسر"
-              : "Secure payment powered by Moyasar"}
+              ? "الدفع آمن ومشفر عبر بوابة أدفع باي"
+              : "Secure payment powered by EdfaPay"}
           </p>
         </div>
       </main>
-
-      <style>{`
-        .moyasar-form-container .mysr-form-header,
-        .moyasar-form-container .mysr-form-tabs {
-          display: none !important;
-        }
-        .moyasar-form-container .mysr-form {
-          border: none !important;
-          box-shadow: none !important;
-          padding: 0 !important;
-        }
-      `}</style>
     </div>
   );
 }

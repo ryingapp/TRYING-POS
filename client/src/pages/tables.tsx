@@ -606,6 +606,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
         notes: data.notes || undefined,
         depositPaid: data.depositPaid,
         source: "phone",
+        branchId: branchId || null,
       });
       return response.json();
     },
@@ -1183,8 +1184,7 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/queue/stats"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
       setIsAddDialogOpen(false);
       setFormData({ customerName: "", customerPhone: "", partySize: 2, notes: "" });
       toast({
@@ -1205,8 +1205,7 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/queue/stats"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
     },
   });
 
@@ -1219,7 +1218,7 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/queue"] });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
       toast({
         title: language === "ar" ? "تم الإشعار" : "Notified",
         description: language === "ar" ? "تم إشعار العميل" : "Customer notified",

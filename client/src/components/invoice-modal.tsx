@@ -1,6 +1,6 @@
 import { useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Printer, Download, MessageCircle, CheckCircle, FileText, Send } from "lucide-react";
+import { Printer } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,8 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
-import { Badge } from "@/components/ui/badge";
 import { useLanguage } from "@/lib/i18n";
 import { QRCodeSVG } from "qrcode.react";
 import type { Restaurant, Order, OrderItem, MenuItem } from "@shared/schema";
@@ -51,6 +49,59 @@ interface InvoiceModalProps {
   onAutoPrintDone?: () => void;
 }
 
+// Thermal receipt CSS for print window
+const receiptCSS = `
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Courier New', 'Segoe UI', Tahoma, monospace;
+    padding: 4px;
+    background: #fff;
+    color: #000;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .receipt {
+    max-width: 80mm;
+    margin: 0 auto;
+    padding: 8px 4px;
+  }
+  .receipt-center { text-align: center; }
+  .receipt-logo { max-width: 80px; max-height: 80px; margin: 0 auto 6px; display: block; object-fit: contain; }
+  .receipt-name { font-size: 16px; font-weight: bold; margin-bottom: 2px; }
+  .receipt-info { font-size: 11px; color: #333; margin-bottom: 1px; }
+  .receipt-divider { border: none; border-top: 1px dashed #000; margin: 8px 0; }
+  .receipt-thick-divider { border: none; border-top: 2px solid #000; margin: 8px 0; }
+  .receipt-title { font-size: 14px; font-weight: bold; text-align: center; margin: 4px 0; }
+  .receipt-order-box {
+    border: 2px solid #000;
+    text-align: center;
+    padding: 6px;
+    margin: 8px 0;
+    font-size: 22px;
+    font-weight: bold;
+  }
+  .receipt-row { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 12px; }
+  .receipt-row-bold { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 13px; font-weight: bold; }
+  .receipt-label { flex-shrink: 0; }
+  .receipt-value { flex-shrink: 0; text-align: end; }
+  .receipt-item { margin-bottom: 6px; }
+  .receipt-item-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .receipt-item-name { font-weight: bold; flex: 1; }
+  .receipt-item-price { flex-shrink: 0; font-weight: bold; }
+  .receipt-item-detail { font-size: 10px; color: #555; margin-top: 1px; }
+  .receipt-total-section { margin-top: 4px; }
+  .receipt-grand-total { display: flex; justify-content: space-between; font-size: 16px; font-weight: bold; padding: 4px 0; }
+  .receipt-payment-box { border: 1px solid #000; padding: 4px 8px; margin: 6px 0; }
+  .receipt-qr { text-align: center; margin-top: 8px; }
+  .receipt-qr svg { margin: 0 auto; }
+  .receipt-footer { text-align: center; font-size: 10px; color: #555; margin-top: 8px; }
+  .receipt-badge { display: inline-block; padding: 2px 8px; border: 1px solid #000; font-size: 11px; font-weight: bold; margin: 4px 0; }
+  @media print {
+    body { padding: 0; }
+    .no-print { display: none !important; }
+  }
+`;
+
 export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onAutoPrintDone }: InvoiceModalProps) {
   const { t, language, getLocalizedName } = useLanguage();
   const printRef = useRef<HTMLDivElement>(null);
@@ -62,7 +113,6 @@ export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onA
   });
 
   const direction = language === "ar" ? "rtl" : "ltr";
-  const isPaid = invoice?.isPaid === true;
 
   useEffect(() => {
     if (autoPrint && invoice && !autoPrintDoneRef.current && printRef.current) {
@@ -87,114 +137,10 @@ export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onA
       <html>
         <head>
           <title>${t("invoice")} - ${invoice?.invoiceNumber}</title>
-          <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-              font-family: 'Segoe UI', Tahoma, sans-serif;
-              padding: 16px;
-              direction: ${direction};
-              background: #fff;
-              color: #000;
-            }
-            .invoice-print-content {
-              max-width: 80mm;
-              margin: 0 auto;
-            }
-            .text-center { text-align: center; }
-            .text-lg { font-size: 18px; }
-            .text-sm { font-size: 13px; }
-            .text-xs { font-size: 11px; }
-            .font-bold { font-weight: bold; }
-            .font-medium { font-weight: 500; }
-            .text-gray-600 { color: #666; }
-            .text-gray-500 { color: #888; }
-            .text-green-600 { color: #16a34a; }
-            .text-red-600 { color: #dc2626; }
-            .mb-4 { margin-bottom: 16px; }
-            .mb-3 { margin-bottom: 12px; }
-            .mb-2 { margin-bottom: 8px; }
-            .mt-4 { margin-top: 16px; }
-            .mt-1 { margin-top: 4px; }
-            .my-3 { margin-top: 12px; margin-bottom: 12px; }
-            .mx-auto { margin-left: auto; margin-right: auto; }
-            .space-y-1 > * + * { margin-top: 4px; }
-            .space-y-2 > * + * { margin-top: 8px; }
-            .flex { display: flex; }
-            .justify-between { justify-content: space-between; }
-            .items-center { align-items: center; }
-            .gap-1 { gap: 4px; }
-            .gap-2 { gap: 8px; }
-            .p-4 { padding: 16px; }
-            .px-3 { padding-left: 12px; padding-right: 12px; }
-            .py-1 { padding-top: 4px; padding-bottom: 4px; }
-            .my-2 { margin-top: 8px; margin-bottom: 8px; }
-            .me-1 { margin-inline-end: 4px; }
-            .rounded-lg { border-radius: 8px; }
-            .rounded-full { border-radius: 9999px; }
-            .border { border: 1px solid #e5e7eb; }
-            .border-green-300 { border-color: #86efac; }
-            .border-red-300 { border-color: #fca5a5; }
-            .bg-white { background: #fff; }
-            .bg-green-100 { background: #dcfce7; }
-            .bg-red-100 { background: #fef2f2; }
-            .text-black { color: #000; }
-            .text-green-700 { color: #15803d; }
-            .text-red-700 { color: #b91c1c; }
-            .text-base { font-size: 16px; }
-            .font-semibold { font-weight: 600; }
-            .inline-flex { display: inline-flex; }
-            .w-28 { width: 112px; }
-            .h-28 { height: 112px; }
-            .separator { border: none; border-top: 1px dashed #ccc; margin: 12px 0; }
-            .paid-badge {
-              display: inline-flex;
-              align-items: center;
-              gap: 4px;
-              padding: 4px 12px;
-              border-radius: 9999px;
-              font-size: 13px;
-              font-weight: 600;
-              background: #dcfce7;
-              color: #16a34a;
-              border: 1px solid #bbf7d0;
-            }
-            .unpaid-badge {
-              display: inline-flex;
-              align-items: center;
-              gap: 4px;
-              padding: 4px 12px;
-              border-radius: 9999px;
-              font-size: 13px;
-              font-weight: 600;
-              background: #fef2f2;
-              color: #dc2626;
-              border: 1px solid #fecaca;
-            }
-            .qr-img { width: 120px; height: 120px; }
-            .zatca-badge {
-              display: inline-flex;
-              align-items: center;
-              gap: 4px;
-              padding: 2px 8px;
-              border: 1px solid #16a34a;
-              color: #16a34a;
-              border-radius: 4px;
-              font-size: 11px;
-            }
-            [data-orientation="horizontal"] {
-              border: none;
-              border-top: 1px dashed #ccc;
-              margin: 12px 0;
-              height: 0;
-            }
-            @media print {
-              body { padding: 0; }
-              .no-print { display: none !important; }
-            }
-          </style>
+          <style>${receiptCSS}</style>
         </head>
         <body>
-          <div class="invoice-print-content">
+          <div class="receipt" dir="${direction}">
             ${content}
           </div>
         </body>
@@ -204,35 +150,54 @@ export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onA
     setTimeout(() => printWindow.print(), 250);
   };
 
-  const handleDownloadPDF = () => {
-    handlePrint();
-  };
-
-  const handleSendWhatsApp = () => {
-    if (invoice?.customerPhone) {
-      const phone = invoice.customerPhone.replace(/[^0-9]/g, "");
-      const message = encodeURIComponent(
-        `${t("invoice")} #${invoice.invoiceNumber}\n` +
-        `${t("total")}: ${invoice.total} ${t("sar")}\n` +
-        `${t("taxAmount")}: ${invoice.taxAmount} ${t("sar")}\n` +
-        `${isPaid ? t("paid") : t("unpaid")}`
-      );
-      window.open(`https://wa.me/${phone}?text=${message}`, "_blank");
-    }
-  };
-
   const formatDate = (date: Date | null) => {
     if (!date) return "";
-    return new Date(date).toLocaleString(language === "ar" ? "ar-SA" : "en-SA", {
+    return new Date(date).toLocaleString("en-SA", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
     });
   };
 
-  // No longer needed — using qrcode.react component directly
+  const getPaymentMethodLabel = (method: string | null) => {
+    if (!method) return "";
+    if (method === "split") return t("splitPayment");
+    if (method === "stc_pay") return t("stcPay");
+    if (method === "hungerstation") return "Hungerstation";
+    if (method === "jahez") return "Jahez";
+    return t(method);
+  };
+
+  const getItemCount = () => {
+    return invoice?.order?.items?.reduce((sum: number, item: any) => sum + (item.quantity || 1), 0) || 0;
+  };
+
+  // Extract external order number from notes (e.g. "[HUNGERSTATION] HS12345" or "[JAHEZ] JH12345")
+  const getExternalOrderInfo = () => {
+    if (invoice?.order?.orderType !== "delivery" || !invoice?.order?.notes) return null;
+    const notes = invoice.order.notes;
+    const match = notes.match(/\[(HUNGERSTATION|JAHEZ)\]\s*(.*)/i);
+    if (match) {
+      return { platform: match[1], orderNumber: match[2] };
+    }
+    return { platform: null, orderNumber: notes };
+  };
+
+  // Build restaurant address line
+  const getRestaurantAddress = () => {
+    const r = invoice?.restaurant;
+    if (!r) return "";
+    const parts = [];
+    if (r.city) parts.push(r.city);
+    if (r.streetName) parts.push(r.streetName);
+    if (r.district) parts.push(r.district);
+    if (parts.length === 0 && r.address) return r.address;
+    return parts.join(" - ");
+  };
 
   if (isLoading || !invoice) {
     return (
@@ -246,200 +211,285 @@ export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onA
     );
   }
 
+  const externalInfo = getExternalOrderInfo();
+  const restaurantAddress = getRestaurantAddress();
+  const restaurantName = getLocalizedName(invoice.restaurant?.nameEn, invoice.restaurant?.nameAr);
+  const itemCount = getItemCount();
+
   return (
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            {t("taxInvoice")}
-            <Badge variant="outline" className="text-green-600 border-green-600">
-              <CheckCircle className="h-3 w-3 me-1" />
-              {t("zatcaCompliant")}
-            </Badge>
+          <DialogTitle className="flex items-center justify-between">
+            <span>{invoice.invoiceNumber}</span>
+            <Button size="sm" variant="outline" onClick={handlePrint} data-testid="button-print-invoice">
+              <Printer className="h-4 w-4 me-1" />
+              {t("printInvoice")}
+            </Button>
           </DialogTitle>
         </DialogHeader>
 
-        <div className="flex gap-2 mb-4">
-          <Button size="sm" variant="outline" onClick={handlePrint} data-testid="button-print-invoice">
-            <Printer className="h-4 w-4 me-1" />
-            {t("printInvoice")}
-          </Button>
-          <Button size="sm" variant="outline" onClick={handleDownloadPDF} data-testid="button-download-pdf">
-            <Download className="h-4 w-4 me-1" />
-            PDF
-          </Button>
-          {invoice.customerPhone && (
-            <Button size="sm" variant="outline" onClick={handleSendWhatsApp} data-testid="button-send-whatsapp">
-              <MessageCircle className="h-4 w-4 me-1" />
-              WhatsApp
-            </Button>
-          )}
-          {invoice.xmlContent && (
-            <Button size="sm" variant="outline" onClick={() => {
-              window.open(`/api/zatca/xml/${invoice.id}`, '_blank');
-            }}>
-              <FileText className="h-4 w-4 me-1" />
-              XML
-            </Button>
-          )}
-          {invoice.xmlContent && (!invoice.zatcaStatus || invoice.zatcaStatus === 'pending') && (
-            <Button size="sm" variant="default" onClick={async () => {
-              try {
-                const res = await fetch(`/api/zatca/submit/${invoice.id}`, {
-                  method: 'POST',
-                  headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' },
-                });
-                const data = await res.json();
-                if (res.ok) {
-                  alert(language === 'ar' ? 'تم الإرسال بنجاح' : 'Submitted successfully');
-                } else {
-                  alert(data.error || 'Submission failed');
-                }
-              } catch (err: any) {
-                alert(err.message);
-              }
-            }}>
-              <Send className="h-4 w-4 me-1" />
-              {language === 'ar' ? 'إرسال ZATCA' : 'Submit ZATCA'}
-            </Button>
-          )}
-        </div>
+        {/* ===== RECEIPT CONTENT (Dank-style thermal receipt) ===== */}
+        <div ref={printRef} className="bg-white text-black rounded-lg border font-mono text-xs leading-relaxed" dir={direction} style={{ maxWidth: '80mm', margin: '0 auto', padding: '12px 8px' }}>
 
-        <div ref={printRef} className="bg-white text-black p-4 rounded-lg border" dir={direction}>
-          <div className="text-center mb-4">
-            <h2 className="text-lg font-bold">
-              {getLocalizedName(invoice.restaurant?.nameEn, invoice.restaurant?.nameAr)}
-            </h2>
+          {/* === HEADER: Logo + Restaurant Info === */}
+          <div style={{ textAlign: 'center', marginBottom: '8px' }}>
+            {invoice.restaurant?.logo && (
+              <img
+                src={invoice.restaurant.logo}
+                alt="logo"
+                crossOrigin="anonymous"
+                referrerPolicy="no-referrer"
+                style={{ maxWidth: '80px', maxHeight: '80px', margin: '0 auto 6px', display: 'block', objectFit: 'contain', borderRadius: '8px' }}
+              />
+            )}
+            {/* Bilingual restaurant name */}
+            {invoice.restaurant?.nameAr && (
+              <div style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '1px' }}>
+                {invoice.restaurant.nameAr}
+              </div>
+            )}
+            {invoice.restaurant?.nameEn && (
+              <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '4px', color: '#333' }}>
+                {invoice.restaurant.nameEn}
+              </div>
+            )}
+            {restaurantAddress && (
+              <div style={{ fontSize: '10px', color: '#333' }}>
+                {restaurantAddress}
+              </div>
+            )}
             {invoice.restaurant?.vatNumber && (
-              <p className="text-xs text-gray-600">
-                {t("vatNumber")}: {invoice.restaurant.vatNumber}
-              </p>
+              <div style={{ fontSize: '10px', color: '#333', marginTop: '2px' }}>
+                الرقم الضريبي / VAT: {invoice.restaurant.vatNumber}
+              </div>
             )}
             {invoice.restaurant?.commercialRegistration && (
-              <p className="text-xs text-gray-600">
-                {t("commercialReg")}: {invoice.restaurant.commercialRegistration}
-              </p>
-            )}
-            {invoice.restaurant?.address && (
-              <p className="text-xs text-gray-600">{invoice.restaurant.address}</p>
+              <div style={{ fontSize: '10px', color: '#333', marginTop: '1px' }}>
+                س.ت / CR: {invoice.restaurant.commercialRegistration}
+              </div>
             )}
             {invoice.restaurant?.phone && (
-              <p className="text-xs text-gray-600">{invoice.restaurant.phone}</p>
+              <div style={{ fontSize: '10px', color: '#333', marginTop: '1px' }}>
+                خدمة العملاء / Customer Service: {invoice.restaurant.phone}
+              </div>
             )}
           </div>
 
-          <div className="text-center mb-3">
-            {isPaid ? (
-              <span className={`paid-badge inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold bg-green-100 text-green-700 border border-green-300`}>
-                &#10003; {t("paid")}
-              </span>
-            ) : (
-              <span className={`unpaid-badge inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold bg-red-100 text-red-700 border border-red-300`}>
-                &#9888; {t("unpaid")}
-              </span>
-            )}
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+          {/* === SIMPLIFIED TAX INVOICE Title === */}
+          <div style={{ textAlign: 'center', margin: '4px 0' }}>
+            <div style={{ fontSize: '14px', fontWeight: 'bold' }}>فاتورة ضريبية مبسطة</div>
+            <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#333' }}>Simplified Tax Invoice</div>
           </div>
 
-          <Separator className="my-3" />
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
 
-          <div className="text-sm space-y-1">
-            <div className="flex justify-between">
-              <span>{t("invoiceNumber")}:</span>
-              <span className="font-medium">{invoice.invoiceNumber}</span>
+          {/* === ORDER NUMBER (Big box) === */}
+          <div style={{ border: '2px solid #000', textAlign: 'center', padding: '6px', margin: '8px 0' }}>
+            <div style={{ fontSize: '13px', fontWeight: 'bold' }}>الطلب #{invoice.order?.orderNumber || invoice.invoiceCounter || '—'}</div>
+          </div>
+
+          {/* === Invoice Details - bilingual separate lines === */}
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '11px' }}>
+              <span>رقم الفاتورة</span>
+              <span style={{ fontWeight: 'bold' }}>{invoice.invoiceNumber}</span>
             </div>
-            <div className="flex justify-between">
-              <span>{t("invoiceDate")}:</span>
+            <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Invoice #</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '11px' }}>
+              <span>التاريخ</span>
               <span>{formatDate(invoice.issuedAt)}</span>
             </div>
-            {invoice.customerName && (
-              <div className="flex justify-between">
-                <span>{t("customer")}:</span>
-                <span>{invoice.customerName}</span>
-              </div>
-            )}
-            {invoice.paymentMethod && (
-              <div className="flex justify-between">
-                <span>{t("paymentMethod")}:</span>
-                <span>{invoice.paymentMethod === "split" ? t("splitPayment") : t(invoice.paymentMethod === "stc_pay" ? "stcPay" : invoice.paymentMethod)}</span>
-              </div>
-            )}
+            <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px' }}>Date</div>
           </div>
 
-          <Separator className="my-3" />
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
 
-          <div className="space-y-2">
-            {invoice.order?.items?.map((item) => (
-              <div key={item.id} className="text-sm">
-                <div className="flex justify-between">
-                  <span>
-                    {getLocalizedName(item.menuItem?.nameEn, item.menuItem?.nameAr)} x{item.quantity}
-                  </span>
-                  <span>{item.totalPrice} {t("sar")}</span>
+          {/* === Order Type + Delivery Info - bilingual === */}
+          <div style={{ marginBottom: '6px' }}>
+            {invoice.order?.orderType && (
+              <>
+                <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '1px' }}>
+                  {invoice.order.orderType === 'delivery' ? 'توصيل' : invoice.order.orderType === 'dine_in' ? 'داخل المطعم' : 'استلام'}
                 </div>
+                <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>
+                  {invoice.order.orderType === 'delivery' ? 'Delivery' : invoice.order.orderType === 'dine_in' ? 'Dine In' : 'Pickup'}
+                </div>
+              </>
+            )}
+
+            {/* Customer Info */}
+            {invoice.customerName && (
+              <div style={{ fontSize: '11px', marginBottom: '2px' }}>
+                العميل : {invoice.customerName}
               </div>
-            ))}
+            )}
+            {invoice.customerPhone && (
+              <div style={{ fontSize: '11px', marginBottom: '2px' }}>
+                الجوال : {invoice.customerPhone}
+              </div>
+            )}
+
+            {/* External Order (Delivery Platform) */}
+            {externalInfo && (
+              <div style={{ fontSize: '11px', marginBottom: '2px' }}>
+                الرقم الخارجي: {externalInfo.platform ? `${externalInfo.platform}: ` : ''}{externalInfo.orderNumber}
+              </div>
+            )}
           </div>
 
-          <Separator className="my-3" />
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '2px solid #000', margin: '8px 0' }} />
 
-          <div className="text-sm space-y-1">
-            <div className="flex justify-between">
-              <span>{t("subtotal")}:</span>
-              <span>{invoice.subtotal} {t("sar")}</span>
+          {/* === ITEMS TABLE === */}
+          <div style={{ marginBottom: '4px' }}>
+            {/* Header row - Arabic line then English line */}
+            <div style={{ fontSize: '10px', fontWeight: 'bold', marginBottom: '2px', display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ width: '30px' }}>الكمية</span>
+              <span style={{ flex: 1, textAlign: 'center' }}>المنتج</span>
+              <span style={{ width: '65px', textAlign: 'end' }}>السعر</span>
             </div>
+            <div style={{ fontSize: '9px', fontWeight: 'bold', marginBottom: '6px', borderBottom: '1px solid #000', paddingBottom: '4px', display: 'flex', justifyContent: 'space-between', color: '#555' }}>
+              <span style={{ width: '30px' }}>Qty</span>
+              <span style={{ flex: 1, textAlign: 'center' }}>Item</span>
+              <span style={{ width: '65px', textAlign: 'end' }}>Price</span>
+            </div>
+
+            {/* Item rows - show both Arabic and English names on separate lines */}
+            {invoice.order?.items?.map((item: any) => {
+              const nameEn = item.menuItem?.nameEn || item.itemName || '';
+              const nameAr = item.menuItem?.nameAr || '';
+
+              return (
+                <div key={item.id} style={{ marginBottom: '8px' }}>
+                  {/* Main line: qty + English name + price */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                    <span style={{ width: '30px' }}>{item.quantity}</span>
+                    <span style={{ flex: 1, fontWeight: 'bold', paddingInline: '4px' }}>
+                      {nameEn}
+                    </span>
+                    <span style={{ width: '65px', textAlign: 'end', fontWeight: 'bold' }}>
+                      {item.totalPrice} ر.س
+                    </span>
+                  </div>
+                  {/* Arabic name */}
+                  {nameAr && nameAr !== nameEn && (
+                    <div style={{ fontSize: '10px', color: '#333', paddingInlineStart: '34px', marginTop: '1px' }}>
+                      {nameAr}
+                    </div>
+                  )}
+                  {/* Notes / customizations */}
+                  {item.notes && (
+                    <div style={{ fontSize: '9px', color: '#555', paddingInlineStart: '34px', marginTop: '1px' }}>
+                      {item.notes}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '2px solid #000', margin: '8px 0' }} />
+
+          {/* === TOTALS - bilingual separate lines === */}
+          <div style={{ marginBottom: '4px' }}>
+            {/* Subtotal */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+              <span>المجموع الفرعي</span>
+              <span>{invoice.subtotal} ر.س</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Subtotal</div>
+
             {parseFloat(invoice.discount || "0") > 0 && (
-              <div className="flex justify-between text-green-600">
-                <span>{t("discount")}:</span>
-                <span>-{invoice.discount} {t("sar")}</span>
-              </div>
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px', color: '#16a34a' }}>
+                  <span>الخصم</span>
+                  <span>-{invoice.discount} ر.س</span>
+                </div>
+                <div style={{ fontSize: '10px', color: '#16a34a', marginBottom: '4px' }}>Discount</div>
+              </>
             )}
+
             {parseFloat(invoice.deliveryFee || "0") > 0 && (
-              <div className="flex justify-between">
-                <span>{t("deliveryFee")}:</span>
-                <span>{invoice.deliveryFee} {t("sar")}</span>
-              </div>
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+                  <span>رسوم التوصيل</span>
+                  <span>{invoice.deliveryFee} ر.س</span>
+                </div>
+                <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Delivery Fee</div>
+              </>
             )}
-            <div className="flex justify-between">
-              <span>{t("tax")} ({invoice.taxRate}%):</span>
-              <span>{invoice.taxAmount} {t("sar")}</span>
+
+            {/* VAT */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+              <span>VAT {invoice.taxRate || '15'}%({invoice.taxRate || '15'}.0%)</span>
+              <span>{invoice.taxAmount} ر.س</span>
             </div>
-            <Separator className="my-2" />
-            <div className="flex justify-between font-bold text-base">
-              <span>{t("grandTotal")}:</span>
-              <span>{invoice.total} {t("sar")}</span>
+            <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>({invoice.taxRate || '15'}.0%) ضريبة القيمة المضافة {invoice.taxRate || '15'}%</div>
+
+            <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '6px 0' }} />
+
+            {/* Grand Total */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '15px', fontWeight: 'bold', marginBottom: '1px' }}>
+              <span>الإجمالي</span>
+              <span>{invoice.total} ر.س</span>
             </div>
+            <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#555', marginBottom: '2px' }}>Total</div>
           </div>
 
-          {invoice.qrCodeData && (
-            <div className="text-center mt-4">
-              <QRCodeSVG
-                value={invoice.qrCodeData}
-                size={120}
-                level="M"
-                className="mx-auto"
-              />
-              <p className="text-xs text-gray-500 mt-1">{t("zatcaCompliant")}</p>
-              {invoice.zatcaStatus && (
-                <Badge 
-                  variant={
-                    invoice.zatcaStatus === 'accepted' ? 'default' :
-                    invoice.zatcaStatus === 'rejected' ? 'destructive' :
-                    invoice.zatcaStatus === 'submitted' ? 'secondary' :
-                    'outline'
-                  }
-                  className="mt-1 text-[10px]"
-                >
-                  {invoice.zatcaStatus === 'accepted' ? '✓ ZATCA Accepted' :
-                   invoice.zatcaStatus === 'rejected' ? '✗ ZATCA Rejected' :
-                   invoice.zatcaStatus === 'submitted' ? '⏳ Submitted' :
-                   '⏳ Pending'}
-                </Badge>
-              )}
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+          {/* === PAYMENT METHOD - bilingual separate lines === */}
+          {invoice.paymentMethod && (
+            <div style={{ margin: '6px 0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px', fontWeight: 'bold' }}>
+                <span>الدفع - {getPaymentMethodLabel(invoice.paymentMethod)}</span>
+                <span>{invoice.total} ر.س</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#555', marginBottom: '4px' }}>
+                <span>Payment - {getPaymentMethodLabel(invoice.paymentMethod)}</span>
+                <span>{invoice.total} ر.س</span>
+              </div>
             </div>
           )}
 
-          <div className="text-center mt-4 text-xs text-gray-500">
-            <p>شكراً لزيارتكم - Thank you for your visit</p>
+          {/* === Product Count === */}
+          <div style={{ fontSize: '11px', margin: '6px 0' }}>
+            عدد المنتجات {itemCount}
+          </div>
+
+          {/* === Divider === */}
+          <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+          {/* === QR Code === */}
+          {invoice.qrCodeData && (
+            <div style={{ textAlign: 'center', margin: '8px 0' }}>
+              <QRCodeSVG
+                value={invoice.qrCodeData}
+                size={130}
+                level="M"
+                style={{ margin: '0 auto' }}
+              />
+            </div>
+          )}
+
+          {/* === Footer === */}
+          <div style={{ textAlign: 'center', fontSize: '10px', color: '#555', marginTop: '8px' }}>
+            <p>شكراً لزيارتكم</p>
+            <p style={{ marginTop: '1px' }}>Thank you for your visit</p>
+          </div>
+
+          {/* === Powered by Trying === */}
+          <div style={{ textAlign: 'center', fontSize: '9px', color: '#999', marginTop: '10px', borderTop: '1px dotted #ccc', paddingTop: '6px' }}>
+            <span>Powered by </span>
+            <span style={{ fontWeight: 'bold', color: '#666' }}>Trying</span>
           </div>
         </div>
       </DialogContent>
