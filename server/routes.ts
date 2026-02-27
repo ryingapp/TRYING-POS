@@ -38,6 +38,14 @@ import {
 } from "./zatca";
 import * as hungerstation from "./hungerstation";
 import * as jahez from "./jahez";
+import {
+  validatePhoneNumber,
+  validateEmail,
+  validatePrice,
+  validateQuantity,
+  normalizeMobilePhone,
+  normalizeEmail,
+} from "./validators";
 
 const JWT_SECRET = process.env.JWT_SECRET || (() => {
   console.warn("⚠️  JWT_SECRET not set! Using random secret. All tokens will be invalidated on restart.");
@@ -1683,6 +1691,34 @@ export async function registerRoutes(
     try {
       const restaurantId = await getRestaurantId(req);
       const caller = await getAuthenticatedUser(req);
+      
+      // ✅ Validate email format if provided
+      if (req.body.email) {
+        const emailValidation = validateEmail(req.body.email);
+        if (!emailValidation.valid) {
+          return res.status(400).json({ error: emailValidation.error, code: "INVALID_EMAIL" });
+        }
+        req.body.email = normalizeEmail(req.body.email);
+      }
+      
+      // ✅ Validate phone format if provided
+      if (req.body.phone) {
+        const phoneValidation = validatePhoneNumber(req.body.phone);
+        if (!phoneValidation.valid) {
+          return res.status(400).json({ error: phoneValidation.error, code: "INVALID_PHONE" });
+        }
+        req.body.phone = normalizeMobilePhone(req.body.phone);
+      }
+      
+      // ✅ Validate ownerPhone format if provided
+      if (req.body.ownerPhone) {
+        const phoneValidation = validatePhoneNumber(req.body.ownerPhone);
+        if (!phoneValidation.valid) {
+          return res.status(400).json({ error: `Owner Phone: ${phoneValidation.error}`, code: "INVALID_OWNER_PHONE" });
+        }
+        req.body.ownerPhone = normalizeMobilePhone(req.body.ownerPhone);
+      }
+      
       const data = insertRestaurantSchema.partial().parse(req.body);
       
       // Protect business fields - once saved, only platform_admin can modify
@@ -2332,6 +2368,79 @@ export async function registerRoutes(
       console.log("Received order data:", JSON.stringify(req.body, null, 2));
       
       const restaurantId = await getRestaurantId(req);
+      
+      // ✅ Validate customer phone if provided
+      if (req.body.customerPhone) {
+        const phoneValidation = validatePhoneNumber(req.body.customerPhone);
+        if (!phoneValidation.valid) {
+          return res.status(400).json({ error: phoneValidation.error, code: "INVALID_CUSTOMER_PHONE" });
+        }
+        req.body.customerPhone = normalizeMobilePhone(req.body.customerPhone);
+      }
+      
+      // ✅ Validate order items: quantities and prices must be positive
+      if (req.body.items && Array.isArray(req.body.items)) {
+        for (let i = 0; i < req.body.items.length; i++) {
+          const item = req.body.items[i];
+          
+          // Validate quantity
+          const quantityValidation = validateQuantity(item.quantity);
+          if (!quantityValidation.valid) {
+            return res.status(400).json({ 
+              error: `Item ${i + 1}: ${quantityValidation.error}`, 
+              code: "INVALID_QUANTITY" 
+            });
+          }
+          
+          // Validate unitPrice
+          if (item.unitPrice !== undefined) {
+            const priceValidation = validatePrice(item.unitPrice);
+            if (!priceValidation.valid) {
+              return res.status(400).json({ 
+                error: `Item ${i + 1}: ${priceValidation.error}`,
+                code: "INVALID_UNIT_PRICE" 
+              });
+            }
+          }
+          
+          // Validate totalPrice
+          if (item.totalPrice !== undefined) {
+            const totalValidation = validatePrice(item.totalPrice);
+            if (!totalValidation.valid) {
+              return res.status(400).json({ 
+                error: `Item ${i + 1}: ${totalValidation.error}`,
+                code: "INVALID_TOTAL_PRICE" 
+              });
+            }
+          }
+        }
+      }
+      
+      // ✅ Validate order totals (no negative values)
+      if (req.body.subtotal !== undefined) {
+        const subtotalValidation = validatePrice(req.body.subtotal);
+        if (!subtotalValidation.valid) {
+          return res.status(400).json({ error: `Subtotal: ${subtotalValidation.error}`, code: "INVALID_SUBTOTAL" });
+        }
+      }
+      if (req.body.deliveryFee !== undefined) {
+        const feeValidation = validatePrice(req.body.deliveryFee);
+        if (!feeValidation.valid) {
+          return res.status(400).json({ error: `DeliveryFee: ${feeValidation.error}`, code: "INVALID_DELIVERY_FEE" });
+        }
+      }
+      if (req.body.discount !== undefined) {
+        const discountValidation = validatePrice(req.body.discount);
+        if (!discountValidation.valid) {
+          return res.status(400).json({ error: `Discount: ${discountValidation.error}`, code: "INVALID_DISCOUNT" });
+        }
+      }
+      if (req.body.total !== undefined) {
+        const totalValidation = validatePrice(req.body.total);
+        if (!totalValidation.valid) {
+          return res.status(400).json({ error: `Total: ${totalValidation.error}`, code: "INVALID_TOTAL" });
+        }
+      }
       
       // Validate branchId exists if provided
       let validBranchId = undefined;
@@ -3420,11 +3529,35 @@ export async function registerRoutes(
       if (body.branchId === "" || body.branchId === "all") {
         body.branchId = null;
       }
-      // Check for duplicate email before creating user
+      // ✅ Validate email format
       if (body.email) {
-        const existingByEmail = await storage.getUserByEmail(body.email.toLowerCase().trim());
+        const emailValidation = validateEmail(body.email);
+        if (!emailValidation.valid) {
+          return res.status(400).json({ error: emailValidation.error, code: "INVALID_EMAIL" });
+        }
+        body.email = normalizeEmail(body.email);
+      }
+      // ✅ Check for duplicate email before creating user
+      if (body.email) {
+        const existingByEmail = await storage.getUserByEmail(body.email);
         if (existingByEmail) {
           return res.status(409).json({ error: "البريد الإلكتروني مسجل بالفعل - Email already exists", code: "EMAIL_EXISTS" });
+        }
+      }
+      // ✅ Validate phone number format (if provided)
+      if (body.phone) {
+        const phoneValidation = validatePhoneNumber(body.phone);
+        if (!phoneValidation.valid) {
+          return res.status(400).json({ error: phoneValidation.error, code: "INVALID_PHONE" });
+        }
+        body.phone = normalizeMobilePhone(body.phone);
+      }
+      // ✅ Check for duplicate phone across restaurant
+      if (body.phone) {
+        const restaurantId = await getRestaurantId(req);
+        const existingByPhone = await storage.getUserByPhone(restaurantId, body.phone);
+        if (existingByPhone) {
+          return res.status( 409).json({ error: "رقم الهاتف مسجل بالفعل - Phone number already exists", code: "PHONE_EXISTS" });
         }
       }
       const data = insertUserSchema.parse({
