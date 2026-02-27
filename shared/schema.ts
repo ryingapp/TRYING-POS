@@ -244,6 +244,9 @@ export const orders = pgTable("orders", {
   total: decimal("total", { precision: 10, scale: 2 }).default("0"),
   paymentMethod: text("payment_method").default("cash"),
   isPaid: boolean("is_paid").default(false),
+  daySessionId: varchar("day_session_id"),
+  daySessionDate: varchar("day_session_date"),
+  isArchived: boolean("is_archived").default(false),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

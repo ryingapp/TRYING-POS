@@ -2,7 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
+import { orders as ordersTable } from "@shared/schema";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -8878,9 +8879,9 @@ export async function registerRoutes(
             try {
               // Mark as archived in orders table
               await db
-                .update(orders as any)
+                .update(ordersTable)
                 .set({ isArchived: true })
-                .where(eq((orders as any).id, order.id))
+                .where(eq(ordersTable.id, order.id))
                 .execute();
             } catch (e) {
               console.error(`Failed to archive order ${order.id}:`, e);
