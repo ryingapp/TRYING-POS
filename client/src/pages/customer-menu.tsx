@@ -974,10 +974,19 @@ export default function CustomerMenuPage() {
               <div className="relative">
                 <Phone className={`absolute ${direction === 'rtl' ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 h-4 w-4 ${d ? 'text-white/20' : 'text-gray-400'}`} />
                 <Input
-                  placeholder={language === "ar" ? "رقم الجوال *" : "Phone Number *"}
+                  placeholder={language === "ar" ? "05xxxxxxxx" : "05xxxxxxxx"}
                   type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={12}
                   value={customerPhone}
-                  onChange={(e) => setCustomerPhone(e.target.value)}
+                  onChange={(e) => {
+                    // فقط أرقام وعلامة + في البداية
+                    const value = e.target.value.replace(/[^\d+]/g, '');
+                    // لو بدأ بـ + خله، غير كذا أرقام فقط
+                    const cleaned = value.startsWith('+') ? '+' + value.slice(1).replace(/\D/g, '') : value.replace(/\D/g, '');
+                    setCustomerPhone(cleaned);
+                  }}
                   data-testid="input-customer-phone"
                   dir="ltr"
                   className={`${direction === 'rtl' ? 'pr-10' : 'pl-10'} h-11 rounded-xl border-0 ${d ? 'bg-white/[0.04] text-white placeholder:text-white/20 ring-1 ring-white/[0.06]' : 'bg-gray-50/80 text-gray-900 placeholder:text-gray-400 ring-1 ring-gray-200/60'} focus:ring-[#8B1A1A]/50`}
