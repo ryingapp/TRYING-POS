@@ -162,14 +162,26 @@ export default function CustomizationsPage() {
   // Create customization group
   const createGroupMutation = useMutation({
     mutationFn: async (data: typeof groupFormData) => {
+      // Validate inputs
+      if (!data.nameEn || !data.nameAr) {
+        throw new Error(language === "ar" ? "الاسم الإنجليزي والعربي مطلوب" : "Both names required");
+      }
+      
+      const minSel = data.minSelections ? parseInt(data.minSelections) : 0;
+      const maxSel = data.maxSelections ? parseInt(data.maxSelections) : 1;
+      
+      if (minSel > maxSel) {
+        throw new Error(language === "ar" ? "الحد الأدنى لا يمكن أن يكون أكبر من الحد الأقصى" : "Min selections cannot be greater than max");
+      }
+      
       const response = await fetch("/api/customization-groups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...data,
           restaurantId: "default",
-          minSelections: data.minSelections ? parseInt(data.minSelections) : null,
-          maxSelections: data.maxSelections ? parseInt(data.maxSelections) : null,
+          minSelections: minSel || null,
+          maxSelections: maxSel || null,
         }),
       });
       if (!response.ok) throw new Error("Failed to create group");
@@ -179,13 +191,21 @@ export default function CustomizationsPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/customization-groups"] });
       setIsGroupDialogOpen(false);
       setGroupFormData({ nameEn: "", nameAr: "", type: "single", isRequired: false, minSelections: "", maxSelections: "" });
-      toast({ title: language === "ar" ? "تم الحفظ" : "Saved" });
+      toast({ title: language === "ar" ? "تم الإضافة" : "Added successfully" });
+    },
+    onError: (error: any) => {
+      toast({ title: error.message, variant: "destructive" });
     },
   });
 
   // Create option
   const createOptionMutation = useMutation({
     mutationFn: async (data: typeof optionFormData) => {
+      // Validate inputs
+      if (!data.nameEn || !data.nameAr) {
+        throw new Error(language === "ar" ? "الاسم الإنجليزي والعربي مطلوب" : "Both names required");
+      }
+      
       const response = await fetch(`/api/customization-groups/${selectedGroup?.id}/options`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -202,7 +222,10 @@ export default function CustomizationsPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/customization-groups", selectedGroup?.id, "options"] });
       setIsOptionDialogOpen(false);
       setOptionFormData({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
-      toast({ title: language === "ar" ? "تم الحفظ" : "Saved" });
+      toast({ title: language === "ar" ? "تم الإضافة" : "Added successfully" });
+    },
+    onError: (error: any) => {
+      toast({ title: error.message, variant: "destructive" });
     },
   });
 

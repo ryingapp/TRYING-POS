@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { PhoneInput } from "@/components/phone-input";
 import {
   Dialog,
   DialogContent,
@@ -333,13 +334,13 @@ export default function CustomersPage() {
                 control={form.control}
                 name="phone"
                 render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{language === "ar" ? "رقم الهاتف" : "Phone Number"} *</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
+                  <PhoneInput
+                    value={field.value}
+                    onChange={field.onChange}
+                    label={language === "ar" ? "رقم الهاتف" : "Phone Number"}
+                    required
+                    showValidation={false}
+                  />
                 )}
               />
               <FormField

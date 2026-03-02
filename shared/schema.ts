@@ -115,7 +115,7 @@ export const branches = pgTable("branches", {
 // Users and roles
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id),
   branchId: varchar("branch_id").references(() => branches.id),
   email: text("email").notNull(),
   password: text("password").notNull().default(""),
@@ -231,7 +231,8 @@ export const orders = pgTable("orders", {
   customerId: varchar("customer_id").references(() => customers.id),
   orderNumber: text("order_number").notNull(),
   orderType: text("order_type").notNull(),
-  status: text("status").default("pending"),
+  status: text("status").default("created"), // created, ready, delivered
+  readyAtTime: timestamp("ready_at_time"), // auto-ready after 30 mins from creation
   customerName: text("customer_name"),
   customerPhone: text("customer_phone"),
   customerAddress: text("customer_address"),
@@ -938,7 +939,7 @@ export type InvoiceWithOrder = Invoice & { order: OrderWithItems; restaurant: Re
 
 // Enums for UI
 export const orderTypes = ["dine_in", "pickup", "delivery"] as const;
-export const orderStatuses = ["payment_pending", "pending", "confirmed", "preparing", "ready", "completed", "cancelled", "refunded"] as const;
+export const orderStatuses = ["created", "pending", "confirmed", "preparing", "ready", "completed", "delivered", "cancelled"] as const;
 export const tableStatuses = ["available", "occupied", "reserved", "maintenance"] as const;
 export const kitchenTypes = ["fast_food", "casual_dining", "fine_dining", "cafe", "bakery", "other"] as const;
 export const priceRanges = ["$", "$$", "$$$", "$$$$"] as const;

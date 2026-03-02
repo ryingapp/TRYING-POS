@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PhoneInput } from "@/components/phone-input";
 import { ArrowLeft, ArrowRight, CalendarCheck, Check, Globe, ChefHat, Loader2, Users, Clock, MapPin, CreditCard, Lock } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { useToast } from "@/hooks/use-toast";
@@ -132,8 +133,18 @@ export default function PublicReservePage() {
   });
 
   const handleSubmit = () => {
-    if (!customerName || !customerPhone || !reservationDate || !reservationTime || !guestCount) {
+    if (!customerName || !reservationDate || !reservationTime || !guestCount) {
       toast({ title: t("required"), variant: "destructive" });
+      return;
+    }
+    // Validate Saudi phone
+    const cleanPhone = customerPhone.replace(/\D/g, "");
+    if (cleanPhone.length !== 10 || !cleanPhone.startsWith("05")) {
+      toast({
+        title: language === "ar" ? "رقم الجوال غير صحيح" : "Invalid phone number",
+        description: language === "ar" ? "يجب أن يكون 10 أرقام ويبدأ بـ 05" : "Must be 10 digits starting with 05",
+        variant: "destructive",
+      });
       return;
     }
     // Validate not in the past
@@ -420,16 +431,15 @@ export default function PublicReservePage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label>{t("phone")} *</Label>
-              <Input
-                type="tel"
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                placeholder={t("phonePlaceholder")}
-                dir="ltr"
-              />
-            </div>
+            <PhoneInput
+              value={customerPhone}
+              onChange={setCustomerPhone}
+              label={t("phone")}
+              placeholder={t("phonePlaceholder")}
+              required
+              showValidation={true}
+              language={language as "en" | "ar"}
+            />
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">

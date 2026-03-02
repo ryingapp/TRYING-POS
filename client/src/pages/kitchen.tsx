@@ -101,28 +101,43 @@ export default function KitchenPage() {
 
   const { data: orders, isLoading, refetch } = useQuery<OrderWithDetails[]>({
     queryKey: [`/api/kitchen/orders${queryParams}`],
-    refetchInterval: 10000, // 10 seconds to avoid rate limiting
+    refetchInterval: 30000, // 30 seconds as fallback (WebSocket is primary)
   });
 
   useEffect(() => {
+    console.log('[Kitchen] Orders received:', orders?.length || 0, orders);
     if (orders) {
-      const pendingCount = orders.filter(o => o.status === "pending").length;
-      if (prevOrderCountRef.current !== null && pendingCount > prevOrderCountRef.current) {
+      const newCount = orders.filter(o => ["created", "pending"].includes(o.status || "")).length;
+      console.log('[Kitchen] New orders:', newCount);
+      if (prevOrderCountRef.current !== null && newCount > prevOrderCountRef.current) {
         playNotificationSound();
         toast({
           title: language === "ar" ? "طلب جديد!" : "New Order!",
-          description: language === "ar" ? `يوجد ${pendingCount} طلب جديد` : `${pendingCount} new order(s)`,
+          description: language === "ar" ? `يوجد ${newCount} طلب جديد` : `${newCount} new order(s)`,
         });
       }
-      prevOrderCountRef.current = pendingCount;
+      prevOrderCountRef.current = newCount;
     }
   }, [orders]);
 
+  const getKitchenNextStatus = (current: string | null): string => {
+    const flow: Record<string, string> = {
+      pending: "preparing",
+      created: "preparing",
+      confirmed: "preparing",
+      preparing: "ready",
+      ready: "completed",
+    };
+    return flow[current || 'pending'] || 'preparing';
+  };
+
   const updateStatusMutation = useMutation({
     mutationFn: async ({ orderId, status }: { orderId: string; status: string }) => {
+      console.log('[Kitchen] Updating order status:', orderId, 'to', status);
       return apiRequest("PUT", `/api/orders/${orderId}/status`, { status });
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
+      console.log('[Kitchen] Status updated successfully:', data);
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/kitchen") });
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/orders") });
       toast({
@@ -131,6 +146,7 @@ export default function KitchenPage() {
       });
     },
     onError: (error) => {
+      console.error('[Kitchen] Status update failed:', error);
       toast({
         title: t("error"),
         description: error instanceof Error ? error.message : (language === "ar" ? "فشل في تحديث حالة الطلب" : "Failed to update order status"),
@@ -197,18 +213,16 @@ export default function KitchenPage() {
     localStorage.setItem("kitchen-auto-print", String(checked));
   };
 
-  // Auto-print new orders and change status to preparing
+  // Auto-print new orders and change status to ready
   useEffect(() => {
     if (!autoPrint || !orders) return;
-    const pendingOrders = orders.filter(o => o.status === "pending" || o.status === "confirmed");
-    for (const order of pendingOrders) {
+    const newOrders = orders.filter(o => ["created", "pending"].includes(o.status || ""));
+    for (const order of newOrders) {
       if (!autoPrintedOrdersRef.current.has(order.id)) {
         autoPrintedOrdersRef.current.add(order.id);
         handlePrintOrder(order);
         // Auto-change status to preparing after printing
-        if (order.status === "pending" || order.status === "confirmed") {
-          updateStatusMutation.mutate({ orderId: order.id, status: "preparing" });
-        }
+        updateStatusMutation.mutate({ orderId: order.id, status: "preparing" });
       }
     }
   }, [orders, autoPrint]);
@@ -231,10 +245,9 @@ export default function KitchenPage() {
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "pending": return "bg-yellow-500";
-      case "confirmed": return "bg-blue-500";
-      case "preparing": return "bg-orange-500";
+      case "created": return "bg-yellow-500";
       case "ready": return "bg-green-500";
+      case "delivered": return "bg-gray-500";
       default: return "bg-gray-500";
     }
   };
@@ -349,8 +362,9 @@ export default function KitchenPage() {
     setTimeout(() => printWindow.print(), 250);
   }, [language, t, getLocalizedName]);
 
-  const pendingOrders = orders?.filter(o => o.status === "pending" || o.status === "confirmed") || [];
+  const createdOrders = orders?.filter(o => ["created", "pending", "confirmed"].includes(o.status || "")) || [];
   const preparingOrders = orders?.filter(o => o.status === "preparing") || [];
+  const readyOrders = orders?.filter(o => o.status === "ready") || [];
 
   if (isLoading) {
     return (
@@ -368,7 +382,7 @@ export default function KitchenPage() {
     );
   }
 
-  const noOrders = pendingOrders.length === 0 && preparingOrders.length === 0;
+  const noOrders = createdOrders.length === 0 && preparingOrders.length === 0 && readyOrders.length === 0;
 
   return (
     <div className="h-full flex flex-col p-6" dir={direction}>
@@ -380,11 +394,15 @@ export default function KitchenPage() {
         <div className="flex items-center gap-4 flex-wrap">
           <Badge variant="outline" className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
-            {t("newOrders")}: {pendingOrders.length}
+            {language === "ar" ? "جديدة" : "New"}: {createdOrders.length}
           </Badge>
           <Badge variant="outline" className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-            {t("inProgress")}: {preparingOrders.length}
+            {language === "ar" ? "قيد التحضير" : "Preparing"}: {preparingOrders.length}
+          </Badge>
+          <Badge variant="outline" className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+            {language === "ar" ? "جاهزة" : "Ready"}: {readyOrders.length}
           </Badge>
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <Volume2 className="h-4 w-4 me-2" />
@@ -433,14 +451,15 @@ export default function KitchenPage() {
           </div>
         </div>
       ) : (
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-6 overflow-auto">
+        <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-6 overflow-auto">
+          {/* New Orders Column */}
           <div className="space-y-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-yellow-500" />
-              {t("newOrders")} ({pendingOrders.length})
+              {language === "ar" ? "طلبات جديدة" : "New Orders"} ({createdOrders.length})
             </h2>
             <div className="space-y-4">
-              {pendingOrders.map((order) => {
+              {createdOrders.map((order) => {
                 const OrderTypeIcon = getOrderTypeIcon(order.orderType);
                 return (
                   <Card 
@@ -464,8 +483,8 @@ export default function KitchenPage() {
                           >
                             <Printer className="h-4 w-4" />
                           </Button>
-                          <Badge className={getStatusColor(order.status || "pending")}>
-                            {t(order.status || "pending")}
+                          <Badge className={getStatusColor(order.status || "created")}>
+                            {language === "ar" ? "جديد" : "New"}
                           </Badge>
                         </div>
                       </div>
@@ -514,16 +533,18 @@ export default function KitchenPage() {
                       </div>
 
                       <Button
-                        data-testid={`button-start-preparing-${order.id}`}
+                        data-testid={`button-start-cooking-${order.id}`}
                         className="w-full"
                         onClick={() => updateStatusMutation.mutate({ 
                           orderId: order.id, 
-                          status: "preparing" 
+                          status: getKitchenNextStatus(order.status) 
                         })}
                         disabled={updateStatusMutation.isPending}
                       >
                         <Play className="h-4 w-4 me-2" />
-                        {t("markPreparing")}
+                        {order.status === "preparing" 
+                          ? (language === "ar" ? "جاهز" : "Mark Ready")
+                          : (language === "ar" ? "ابدأ التحضير" : "Start Preparing")}
                       </Button>
                     </CardContent>
                   </Card>
@@ -532,19 +553,19 @@ export default function KitchenPage() {
             </div>
           </div>
 
+          {/* Preparing Orders Column */}
           <div className="space-y-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-orange-500 animate-pulse" />
-              {t("inProgress")} ({preparingOrders.length})
+              {language === "ar" ? "قيد التحضير" : "Preparing"} ({preparingOrders.length})
             </h2>
             <div className="space-y-4">
               {preparingOrders.map((order) => {
                 const OrderTypeIcon = getOrderTypeIcon(order.orderType);
                 return (
                   <Card 
-                    key={order.id}
-                    data-testid={`card-kitchen-preparing-${order.id}`}
-                    className="bg-orange-50 dark:bg-orange-950/20"
+                    key={order.id} 
+                    className="bg-orange-50 dark:bg-orange-950/20 border-orange-200"
                   >
                     <CardHeader className="pb-2">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -562,8 +583,8 @@ export default function KitchenPage() {
                           >
                             <Printer className="h-4 w-4" />
                           </Button>
-                          <Badge className={getStatusColor(order.status || "preparing")}>
-                            {t(order.status || "preparing")}
+                          <Badge className="bg-orange-500 text-white">
+                            {language === "ar" ? "قيد التحضير" : "Preparing"}
                           </Badge>
                         </div>
                       </div>
@@ -601,8 +622,96 @@ export default function KitchenPage() {
                         </div>
                       )}
 
+                      <Button
+                        className="w-full bg-green-600 hover:bg-green-700"
+                        onClick={() => updateStatusMutation.mutate({ 
+                          orderId: order.id, 
+                          status: "ready" 
+                        })}
+                        disabled={updateStatusMutation.isPending}
+                      >
+                        <CheckCircle className="h-4 w-4 me-2" />
+                        {language === "ar" ? "جاهز" : "Mark Ready"}
+                      </Button>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Ready Orders Column */}
+          <div className="space-y-4">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
+              {language === "ar" ? "جاهزة للتسليم" : "Ready"} ({readyOrders.length})
+            </h2>
+            <div className="space-y-4">
+              {readyOrders.map((order) => {
+                const OrderTypeIcon = getOrderTypeIcon(order.orderType);
+                return (
+                  <Card 
+                    key={order.id}
+                    data-testid={`card-kitchen-ready-${order.id}`}
+                    className="bg-green-50 dark:bg-green-950/20"
+                  >
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <CardTitle className="text-lg flex items-center gap-2">
+                          <OrderTypeIcon className="h-5 w-5" />
+                          {order.orderNumber}
+                        </CardTitle>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            onClick={() => handlePrintOrder(order)}
+                            title={t("printOrder")}
+                          >
+                            <Printer className="h-4 w-4" />
+                          </Button>
+                          <Badge className={getStatusColor(order.status || "ready")}>
+                            {language === "ar" ? "جاهز" : "Ready"}
+                          </Badge>
+                        </div>
+                      </div>
+                      {order.table && order.orderType === "dine_in" && (
+                        <Badge className="bg-blue-500 text-white text-base px-3 py-1 mt-1">
+                          <MapPin className="h-4 w-4 me-1" />
+                          {t("tableNumber")} {order.table.tableNumber}
+                        </Badge>
+                      )}
+                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-4 w-4" />
+                          {order.createdAt && getTimeSince(order.createdAt)}
+                        </span>
+                        {order.customerName && <span>{order.customerName}</span>}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {order.items && order.items.length > 0 && (
+                        <div className="space-y-1">
+                          {order.items.map((item, idx) => (
+                            <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
+                              <span className="font-medium">
+                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
+                              </span>
+                              <Badge variant="secondary">{item.quantity}x</Badge>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {order.kitchenNotes && (
+                        <div className="p-2 bg-green-100 dark:bg-green-900/20 rounded-md text-sm">
+                          <strong>{t("kitchenNotes")}:</strong> {order.kitchenNotes}
+                        </div>
+                      )}
+
                       {order.orderType === "delivery" && order.notes && (
-                        <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
+                        <div className="p-2 bg-green-100 dark:bg-green-900/20 rounded-md text-sm">
                           <strong>🛵 {language === "ar" ? "توصيل" : "Delivery"}:</strong> {order.notes}
                         </div>
                       )}
@@ -612,17 +721,17 @@ export default function KitchenPage() {
                       </div>
 
                       <Button
-                        data-testid={`button-mark-ready-${order.id}`}
+                        data-testid={`button-mark-delivered-${order.id}`}
                         className="w-full"
                         variant="default"
                         onClick={() => updateStatusMutation.mutate({ 
                           orderId: order.id, 
-                          status: "ready" 
+                          status: "completed" 
                         })}
                         disabled={updateStatusMutation.isPending}
                       >
                         <CheckCircle className="h-4 w-4 me-2" />
-                        {t("markReady")}
+                        {language === "ar" ? "تم التسليم" : "Completed"}
                       </Button>
                     </CardContent>
                   </Card>

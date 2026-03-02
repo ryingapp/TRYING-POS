@@ -2,10 +2,10 @@
 // Ensures clean data architecture globally
 
 /**
- * Phone Number Validation
- * - Accepts only 10+ digits
- * - Must start with 05 (Saudi Arabia)
- * - No letters or special characters
+ * Phone Number Validation (Saudi Arabia)
+ * - Exactly 10 digits
+ * - Must start with 05
+ * - No letters, spaces, or special characters
  */
 export const validatePhoneNumber = (phone: string): { valid: boolean; error?: string } => {
   if (!phone) {
@@ -20,9 +20,9 @@ export const validatePhoneNumber = (phone: string): { valid: boolean; error?: st
     return { valid: false, error: "Phone number must contain only digits" };
   }
 
-  // Check length (at least 10 digits for Saudi format)
-  if (cleaned.length < 10) {
-    return { valid: false, error: "Phone number must be at least 10 digits" };
+  // Check exact length (exactly 10 digits for Saudi format)
+  if (cleaned.length !== 10) {
+    return { valid: false, error: "Phone number must be exactly 10 digits (e.g., 0501234567)" };
   }
 
   // Check if starts with 05 (Saudi Arabia standard)

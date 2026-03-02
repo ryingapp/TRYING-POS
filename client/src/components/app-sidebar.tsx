@@ -21,29 +21,40 @@ import type { Restaurant } from "@shared/schema";
 
 export function AppSidebar() {
   const { t, direction, getLocalizedName } = useLanguage();
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const [location] = useLocation();
 
   const { data: restaurant } = useQuery<Restaurant>({
     queryKey: ["/api/restaurant"],
   });
 
-  const menuItems = [
-    { title: t("dashboard"), url: "/", icon: LayoutDashboard },
-    { title: t("pos"), url: "/pos", icon: ShoppingCart },
-    { title: t("kitchen"), url: "/kitchen", icon: CookingPot },
-    { title: t("menu"), url: "/menu", icon: UtensilsCrossed },
-    { title: t("orders"), url: "/orders", icon: ClipboardList },
-    { title: direction === "rtl" ? "الطاولات والحجوزات" : "Tables & Reservations", url: "/tables", icon: Users },
-    { title: t("qrCodes"), url: "/qr-codes", icon: QrCode },
-    { title: t("inventory"), url: "/inventory", icon: Package },
-    { title: t("reports"), url: "/reports", icon: BarChart3 },
-    { title: direction === "rtl" ? "أرشيف الفواتير" : "Invoice Archive", url: "/invoice-archive", icon: FileText },
-    { title: direction === "rtl" ? "العملاء" : "Customers", url: "/customers", icon: UserCheck },
-    { title: direction === "rtl" ? "التقييمات" : "Reviews", url: "/reviews", icon: Star },
-    { title: t("promotions"), url: "/promotions", icon: Tag },
-    { title: t("settings"), url: "/settings", icon: Settings },
+  // Check if user has permission
+  const hasPermission = (perm: boolean | null | undefined) => {
+    if (!user) return false;
+    // Owner, platform_admin, and branch_manager have all permissions
+    if (user.role === 'owner' || user.role === 'platform_admin' || user.role === 'branch_manager') return true;
+    return perm === true;
+  };
+
+  const allMenuItems = [
+    { title: t("dashboard"), url: "/", icon: LayoutDashboard, permission: user?.permDashboard },
+    { title: t("pos"), url: "/pos", icon: ShoppingCart, permission: user?.permPos },
+    { title: t("kitchen"), url: "/kitchen", icon: CookingPot, permission: user?.permKitchen },
+    { title: t("menu"), url: "/menu", icon: UtensilsCrossed, permission: user?.permMenu },
+    { title: t("orders"), url: "/orders", icon: ClipboardList, permission: user?.permOrders },
+    { title: direction === "rtl" ? "الطاولات والحجوزات" : "Tables & Reservations", url: "/tables", icon: Users, permission: user?.permTables },
+    { title: t("qrCodes"), url: "/qr-codes", icon: QrCode, permission: user?.permQr },
+    { title: t("inventory"), url: "/inventory", icon: Package, permission: user?.permInventory },
+    { title: t("reports"), url: "/reports", icon: BarChart3, permission: user?.permReports },
+    { title: direction === "rtl" ? "أرشيف الفواتير" : "Invoice Archive", url: "/invoice-archive", icon: FileText, permission: user?.permReports },
+    { title: direction === "rtl" ? "العملاء" : "Customers", url: "/customers", icon: UserCheck, permission: user?.permMarketing },
+    { title: direction === "rtl" ? "التقييمات" : "Reviews", url: "/reviews", icon: Star, permission: user?.permReviews },
+    { title: t("promotions"), url: "/promotions", icon: Tag, permission: user?.permMarketing },
+    { title: t("settings"), url: "/settings", icon: Settings, permission: user?.permSettings },
   ];
+
+  // Filter menu items based on permissions
+  const menuItems = allMenuItems.filter(item => hasPermission(item.permission));
 
   const isActive = (url: string) => {
     if (url === "/") return location === "/";

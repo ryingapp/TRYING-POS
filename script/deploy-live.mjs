@@ -1,16 +1,21 @@
 import { Client } from "ssh2";
-import { readFileSync, createReadStream, statSync } from "fs";
+import { readFileSync, createReadStream, statSync, existsSync } from "fs";
 import { resolve } from "path";
+import { homedir } from "os";
 
 const HOST = "72.62.40.134";
 const USER = "root";
 const PASS = "Dr&4f1guk@jID,W)d?tg";
+const SSH_KEY_PATH = resolve(homedir(), ".ssh", "id_ed25519_trying");
 const APP_DIR = "/opt/trying";
 const DOMAIN = "tryingpos.com";
 const DB_URL = process.env.DATABASE_URL || "postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require";
 
 const archivePath = resolve("C:\\Users\\msaz1\\Downloads\\trying-deploy.tar.gz");
 const deployScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\deploy.sh");
+const backupScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\backup-db.sh");
+const restoreScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\restore-db.sh");
+const setupBackupScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\setup-backup.sh");
 
 function exec(conn, cmd) {
   return new Promise((resolve, reject) => {
@@ -64,18 +69,30 @@ async function main() {
       reject(err);
     });
     console.log(`Connecting to ${USER}@${HOST}...`);
-    conn.connect({ 
+    
+    // Try SSH key first, fallback to password
+    const connectOptions = { 
       host: HOST, 
       port: 22, 
       username: USER, 
-      password: PASS,
       tryKeyboard: true,
       readyTimeout: 30000,
       algorithms: {
         kex: ['ecdh-sha2-nistp256','ecdh-sha2-nistp384','ecdh-sha2-nistp521','diffie-hellman-group-exchange-sha256','diffie-hellman-group14-sha256','diffie-hellman-group14-sha1'],
         serverHostKey: ['ssh-ed25519','ecdsa-sha2-nistp256','rsa-sha2-512','rsa-sha2-256','ssh-rsa'],
       },
-    });
+    };
+    
+    // Use SSH key if available
+    if (existsSync(SSH_KEY_PATH)) {
+      console.log(`Using SSH key: ${SSH_KEY_PATH}`);
+      connectOptions.privateKey = readFileSync(SSH_KEY_PATH);
+    } else {
+      console.log("Using password authentication");
+      connectOptions.password = PASS;
+    }
+    
+    conn.connect(connectOptions);
     conn.on("keyboard-interactive", (name, instructions, lang, prompts, finish) => {
       console.log("Keyboard-interactive auth requested");
       finish([PASS]);
@@ -85,15 +102,23 @@ async function main() {
   console.log("Connected!\n");
 
   // Step 1: Upload archive
-  console.log("[1/3] Uploading project archive...");
+  console.log("[1/5] Uploading project archive...");
   await uploadFile(conn, archivePath, "/tmp/trying-deploy.tar.gz");
 
   // Step 2: Upload deploy script
-  console.log("\n[2/3] Uploading deploy script...");
+  console.log("\n[2/5] Uploading deploy script...");
   await uploadFile(conn, deployScript, "/tmp/deploy.sh");
 
-  // Step 3: Run deploy script
-  console.log("\n[3/3] Running deployment...\n");
+  // Step 3: Upload backup scripts
+  console.log("\n[3/5] Uploading backup script...");
+  await uploadFile(conn, backupScript, APP_DIR + "/backup-db.sh");
+  
+  console.log("\n[4/5] Uploading restore script...");
+  await uploadFile(conn, restoreScript, APP_DIR + "/restore-db.sh");
+  await uploadFile(conn, setupBackupScript, APP_DIR + "/setup-backup.sh");
+
+  // Step 4: Run deploy script
+  console.log("\n[5/5] Running deployment...\n");
   const result = await exec(conn, "chmod +x /tmp/deploy.sh && bash /tmp/deploy.sh 2>&1");
   
   if (result.code !== 0) {

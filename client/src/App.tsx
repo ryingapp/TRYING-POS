@@ -6,10 +6,12 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Header } from "@/components/header";
+import { ProtectedRoute } from "@/components/protected-route";
 import { ThemeProvider } from "@/lib/theme";
 import { LanguageProvider, useLanguage } from "@/lib/i18n";
 import { BranchProvider } from "@/lib/branch";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { useWebSocket } from "@/lib/useWebSocket";
 import Dashboard from "@/pages/dashboard";
 import MenuPage from "@/pages/menu";
 import OrdersPage from "@/pages/orders";
@@ -48,6 +50,10 @@ import NotFound from "@/pages/not-found";
 
 function AdminLayout() {
   const { direction } = useLanguage();
+  const { user } = useAuth();
+  
+  // Enable real-time notifications via WebSocket
+  useWebSocket();
   
   const style = {
     "--sidebar-width": "16rem",
@@ -62,28 +68,28 @@ function AdminLayout() {
           <Header />
           <main className="flex-1 overflow-auto">
             <Switch>
-              <Route path="/" component={Dashboard} />
-              <Route path="/pos" component={POSPage} />
-              <Route path="/kitchen" component={KitchenPage} />
-              <Route path="/kitchen-sections" component={KitchenSectionsPage} />
-              <Route path="/menu" component={MenuPage} />
-              <Route path="/orders" component={OrdersPage} />
-              <Route path="/tables" component={TablesPage} />
-              <Route path="/qr-codes" component={QRCodesPage} />
-              <Route path="/inventory" component={InventoryPage} />
-              <Route path="/reports" component={ReportsPage} />
-              <Route path="/customers" component={CustomersPage} />
-              <Route path="/promotions" component={PromotionsPage} />
-              <Route path="/reservations" component={ReservationsPage} />
-              <Route path="/queue" component={QueuePage} />
-              <Route path="/day-session" component={DaySessionPage} />
-              <Route path="/customizations" component={CustomizationsPage} />
-              <Route path="/invoice-archive" component={InvoiceArchivePage} />
-              <Route path="/delivery-settings" component={DeliverySettingsPage} />
-              <Route path="/delivery-orders" component={DeliveryOrdersPage} />
-              <Route path="/reviews" component={ReviewsPage} />
-              <Route path="/kiosk" component={KioskPage} />
-              <Route path="/settings" component={SettingsPage} />
+              <Route path="/" component={() => <ProtectedRoute component={Dashboard} permission={user?.permDashboard} />} />
+              <Route path="/pos" component={() => <ProtectedRoute component={POSPage} permission={user?.permPos} />} />
+              <Route path="/kitchen" component={() => <ProtectedRoute component={KitchenPage} permission={user?.permKitchen} />} />
+              <Route path="/kitchen-sections" component={() => <ProtectedRoute component={KitchenSectionsPage} permission={user?.permKitchen} />} />
+              <Route path="/menu" component={() => <ProtectedRoute component={MenuPage} permission={user?.permMenu} />} />
+              <Route path="/orders" component={() => <ProtectedRoute component={OrdersPage} permission={user?.permOrders} />} />
+              <Route path="/tables" component={() => <ProtectedRoute component={TablesPage} permission={user?.permTables} />} />
+              <Route path="/qr-codes" component={() => <ProtectedRoute component={QRCodesPage} permission={user?.permQr} />} />
+              <Route path="/inventory" component={() => <ProtectedRoute component={InventoryPage} permission={user?.permInventory} />} />
+              <Route path="/reports" component={() => <ProtectedRoute component={ReportsPage} permission={user?.permReports} />} />
+              <Route path="/customers" component={() => <ProtectedRoute component={CustomersPage} permission={user?.permMarketing} />} />
+              <Route path="/promotions" component={() => <ProtectedRoute component={PromotionsPage} permission={user?.permMarketing} />} />
+              <Route path="/reservations" component={() => <ProtectedRoute component={ReservationsPage} permission={user?.permTables} />} />
+              <Route path="/queue" component={() => <ProtectedRoute component={QueuePage} permission={user?.permTables} />} />
+              <Route path="/day-session" component={() => <ProtectedRoute component={DaySessionPage} permission={user?.permReports} />} />
+              <Route path="/customizations" component={() => <ProtectedRoute component={CustomizationsPage} permission={user?.permMenu} />} />
+              <Route path="/invoice-archive" component={() => <ProtectedRoute component={InvoiceArchivePage} permission={user?.permReports} />} />
+              <Route path="/delivery-settings" component={() => <ProtectedRoute component={DeliverySettingsPage} permission={user?.permSettings} />} />
+              <Route path="/delivery-orders" component={() => <ProtectedRoute component={DeliveryOrdersPage} permission={user?.permOrders} />} />
+              <Route path="/reviews" component={() => <ProtectedRoute component={ReviewsPage} permission={user?.permReviews} />} />
+              <Route path="/kiosk" component={() => <ProtectedRoute component={KioskPage} permission={user?.permPos} />} />
+              <Route path="/settings" component={() => <ProtectedRoute component={SettingsPage} permission={user?.permSettings} />} />
               <Route component={NotFound} />
             </Switch>
           </main>

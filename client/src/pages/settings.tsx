@@ -3,7 +3,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useState, useRef } from "react";
-import { Store, Receipt, Building2, Users, LayoutGrid, Plus, Trash2, Edit2, Printer, CreditCard, Upload, ExternalLink, CheckCircle2, AlertCircle, Clock, RefreshCw, ImagePlus, X, Crown, FileText, Shield, Wifi, Link2 } from "lucide-react";
+import { Store, Receipt, Building2, Users, LayoutGrid, Plus, Trash2, Edit2, Printer, CreditCard, Upload, ExternalLink, CheckCircle2, AlertCircle, Clock, RefreshCw, ImagePlus, X, Crown, FileText, Shield, Wifi, Link2, AlertTriangle } from "lucide-react";
 import DeliverySettingsPage from "./delivery-settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -347,6 +347,7 @@ export default function SettingsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] }); // Update current user if permissions changed
       setUserDialogOpen(false);
       setEditingUser(null);
       userForm.reset();
@@ -617,6 +618,12 @@ export default function SettingsPage() {
             <TabsTrigger value="delivery" data-testid="tab-delivery">
               <Link2 className="h-4 w-4 me-2" />
               {language === "ar" ? "منصات التوصيل" : "Delivery"}
+            </TabsTrigger>
+          )}
+          {isPlatformAdmin && (
+            <TabsTrigger value="danger" data-testid="tab-danger" className="text-red-600 hover:text-red-700">
+              <AlertTriangle className="h-4 w-4 me-2" />
+              {language === "ar" ? "حذف مطعم" : "Delete Restaurant"}
             </TabsTrigger>
           )}
 
@@ -1867,36 +1874,91 @@ export default function SettingsPage() {
                       </div>
 
                       {/* Permissions Grid */}
-                      <div className="space-y-2">
-                        <h4 className="font-medium">{t("permissions")}</h4>
-                        <div className="grid grid-cols-3 md:grid-cols-4 gap-3">
+                      <div className="space-y-3">
+                        <div>
+                          <h4 className="font-medium">{t("permissions")}</h4>
+                          <p className="text-sm text-muted-foreground mt-1">
+                            {language === "ar" 
+                              ? "💡 ملاحظة: المالك ومدير الفرع لديهم جميع الصلاحيات تلقائياً. الصلاحيات تتحكم في ظهور القوائم الجانبية والوصول للصفحات."
+                              : "💡 Note: Owner and Branch Manager have all permissions automatically. Permissions control sidebar menu visibility and page access."}
+                          </p>
+                        </div>
+                        <div className="grid gap-3">
                           {[
-                            { key: "permDashboard", label: "permDashboard" },
-                            { key: "permPos", label: "permPos" },
-                            { key: "permOrders", label: "permOrders" },
-                            { key: "permMenu", label: "permMenu" },
-                            { key: "permKitchen", label: "permKitchen" },
-                            { key: "permInventory", label: "permInventory" },
-                            { key: "permReviews", label: "permReviews" },
-                            { key: "permMarketing", label: "permMarketing" },
-                            { key: "permQr", label: "permQr" },
-                            { key: "permReports", label: "permReports" },
-                            { key: "permSettings", label: "permSettings" },
-                          ].map(({ key, label }) => (
+                            { 
+                              key: "permDashboard", 
+                              label: "permDashboard",
+                              desc: language === "ar" ? "الصفحة الرئيسية والإحصائيات" : "Dashboard & Statistics"
+                            },
+                            { 
+                              key: "permPos", 
+                              label: "permPos",
+                              desc: language === "ar" ? "نقطة البيع وإنشاء الطلبات" : "Point of Sale & Create Orders"
+                            },
+                            { 
+                              key: "permOrders", 
+                              label: "permOrders",
+                              desc: language === "ar" ? "عرض وإدارة الطلبات" : "View & Manage Orders"
+                            },
+                            { 
+                              key: "permMenu", 
+                              label: "permMenu",
+                              desc: language === "ar" ? "تعديل المنيو والأصناف" : "Edit Menu & Items"
+                            },
+                            { 
+                              key: "permKitchen", 
+                              label: "permKitchen",
+                              desc: language === "ar" ? "شاشة المطبخ" : "Kitchen Display"
+                            },
+                            { 
+                              key: "permInventory", 
+                              label: "permInventory",
+                              desc: language === "ar" ? "المخزون والمواد" : "Inventory & Stock"
+                            },
+                            { 
+                              key: "permReviews", 
+                              label: "permReviews",
+                              desc: language === "ar" ? "التقييمات والمراجعات" : "Reviews & Ratings"
+                            },
+                            { 
+                              key: "permMarketing", 
+                              label: "permMarketing",
+                              desc: language === "ar" ? "العروض والعملاء" : "Promotions & Customers"
+                            },
+                            { 
+                              key: "permQr", 
+                              label: "permQr",
+                              desc: language === "ar" ? "رموز QR للطلب الذاتي" : "QR Codes for Self-Order"
+                            },
+                            { 
+                              key: "permReports", 
+                              label: "permReports",
+                              desc: language === "ar" ? "التقارير والأرشيف" : "Reports & Archive"
+                            },
+                            { 
+                              key: "permSettings", 
+                              label: "permSettings",
+                              desc: language === "ar" ? "الإعدادات والطابعات" : "Settings & Printers"
+                            },
+                          ].map(({ key, label, desc }) => (
                             <FormField
                               key={key}
                               control={userForm.control}
                               name={key as keyof z.infer<typeof userFormSchema>}
                               render={({ field }) => (
-                                <FormItem className="flex items-center gap-2 space-y-0">
+                                <FormItem className="flex items-start gap-3 space-y-0 p-3 rounded-lg border hover:bg-accent/50 transition-colors">
                                   <FormControl>
                                     <Checkbox
                                       checked={field.value as boolean}
                                       onCheckedChange={field.onChange}
                                       data-testid={`checkbox-${key}`}
+                                      className="mt-1"
                                     />
                                   </FormControl>
-                                  <FormLabel className="text-sm font-normal">{t(label)}</FormLabel>
+                                  <div className="flex-1 space-y-0.5">
+                                    <FormLabel className="text-sm font-medium cursor-pointer">{t(label)}</FormLabel>
+                                    <p className="text-xs text-muted-foreground">{desc}</p>
+                                  </div>
                                 </FormItem>
                               )}
                             />
@@ -2441,6 +2503,13 @@ export default function SettingsPage() {
           <DeliverySettingsPage />
         </TabsContent>
 
+        {/* Danger Zone - Delete Restaurant (Platform Admin Only) */}
+        {isPlatformAdmin && (
+          <TabsContent value="danger" className="mt-4">
+            <DangerZoneTab restaurantsList={restaurantsList} />
+          </TabsContent>
+        )}
+
       </Tabs>
     </div>
   );
@@ -2906,5 +2975,156 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// ===================== Platform Admin - Danger Zone =====================
+function DangerZoneTab({ restaurantsList }: { restaurantsList?: any[] }) {
+  const { toast } = useToast();
+  const { language } = useLanguage();
+  const [selectedRestaurant, setSelectedRestaurant] = useState("");
+  const [confirmText, setConfirmText] = useState("");
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+
+  const isAr = language === "ar";
+
+  const deleteRestaurant = useMutation({
+    mutationFn: async (restaurantId: string) => {
+      const res = await apiRequest("DELETE", `/api/restaurants/${restaurantId}`);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: isAr ? "تم الحذف" : "Deleted",
+        description: isAr ? "تم حذف المطعم وجميع بيانات له" : "Restaurant and all data deleted",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/restaurants"] });
+      setSelectedRestaurant("");
+      setConfirmText("");
+      setShowConfirmDialog(false);
+    },
+    onError: (err: any) => {
+      toast({
+        title: isAr ? "فشل الحذف" : "Delete Failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Card className="border-red-200 dark:border-red-900">
+      <CardHeader>
+        <CardTitle className="text-red-600 flex items-center gap-2">
+          <AlertTriangle className="h-5 w-5" />
+          {isAr ? "منطقة الخطر - حذف مطعم" : "Danger Zone - Delete Restaurant"}
+        </CardTitle>
+        <CardDescription className="text-red-600 dark:text-red-400">
+          {isAr 
+            ? "حذف أي مطعم من المنصة مع جميع بياناته (الفروع، الأوامر، المنيو)"
+            : "Delete any restaurant from the platform with all its data (branches, orders, menu)"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          <div>
+            <label className="text-sm font-medium">
+              {isAr ? "اختر المطعم" : "Select Restaurant"}
+            </label>
+            <select
+              value={selectedRestaurant}
+              onChange={(e) => {
+                setSelectedRestaurant(e.target.value);
+                setConfirmText("");
+              }}
+              className="w-full mt-2 px-3 py-2 border rounded-md bg-background"
+            >
+              <option value="">{isAr ? "-- اختر مطعم --" : "-- Select a restaurant --"}</option>
+              {restaurantsList?.map((r: any) => (
+                <option key={r.id} value={r.id}>
+                  {r.nameEn} {r.nameAr ? `(${r.nameAr})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedRestaurant && (
+            <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+              <Button
+                variant="destructive"
+                className="w-full md:w-auto"
+                onClick={() => setShowConfirmDialog(true)}
+              >
+                <Trash2 className="h-4 w-4 me-2" />
+                {isAr ? "حذف المطعم" : "Delete Restaurant"}
+              </Button>
+
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle className="text-red-600">
+                    {isAr ? "تأكيد حذف المطعم" : "Confirm Restaurant Deletion"}
+                  </DialogTitle>
+                </DialogHeader>
+
+                <div className="space-y-4">
+                  <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800">
+                    <p className="text-sm text-red-700 dark:text-red-300">
+                      {isAr
+                        ? "⚠️ هذا سيحذف المطعم بشكل نهائي. كل البيانات ستُفقد للأبد."
+                        : "⚠️ This will permanently delete the restaurant. All data will be lost forever."}
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium">
+                      {isAr ? "اكتب اسم المطعم للتأكيد" : "Type restaurant name to confirm"}
+                    </label>
+                    <Input
+                      value={confirmText}
+                      onChange={(e) => setConfirmText(e.target.value)}
+                      placeholder={restaurantsList?.find((r: any) => r.id === selectedRestaurant)?.nameEn}
+                      className="mt-2"
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setShowConfirmDialog(false);
+                        setConfirmText("");
+                      }}
+                    >
+                      {isAr ? "إلغاء" : "Cancel"}
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      disabled={
+                        confirmText !== restaurantsList?.find((r: any) => r.id === selectedRestaurant)?.nameEn ||
+                        deleteRestaurant.isPending
+                      }
+                      onClick={() => {
+                        deleteRestaurant.mutate(selectedRestaurant);
+                      }}
+                    >
+                      {deleteRestaurant.isPending ? (
+                        <span>{isAr ? "جاري الحذف..." : "Deleting..."}</span>
+                      ) : (
+                        <>
+                          <Trash2 className="h-4 w-4 me-2" />
+                          {isAr ? "نعم، احذف" : "Yes, Delete"}
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

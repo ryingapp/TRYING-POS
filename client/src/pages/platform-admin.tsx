@@ -65,6 +65,7 @@ import {
   Wallet,
   Activity,
   CheckCircle,
+  Trash2,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
@@ -128,8 +129,6 @@ interface RestaurantDetail {
   avgOrderValue: string;
   menuItemsCount: number;
   recentOrders: RecentOrder[];
-  ordersByStatus: Record<string, number>;
-  ordersByType: Record<string, number>;
   branches: Array<{
     id: string;
     name: string;
@@ -346,6 +345,49 @@ export default function PlatformAdminPage() {
     },
     onError: () => {
       toast({ title: isAr ? "حدث خطأ" : "Error occurred", variant: "destructive" });
+    },
+  });
+
+  // Delete Restaurant Mutation
+  const deleteRestaurantMutation = useMutation({
+    mutationFn: async (restaurantId: string) => {
+      const res = await apiRequest("DELETE", `/api/restaurants/${restaurantId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/restaurants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
+      toast({
+        title: isAr ? "تم حذف المطعم بنجاح" : "Restaurant deleted successfully",
+        description: isAr ? "تم حذف المطعم وجميع بياناته" : "Restaurant and all its data have been deleted",
+      });
+    },
+    onError: () => {
+      toast({
+        title: isAr ? "فشل حذف المطعم" : "Failed to delete restaurant",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Delete Branch Mutation
+  const deleteBranchMutation = useMutation({
+    mutationFn: async (branchId: string) => {
+      const res = await apiRequest("DELETE", `/api/branches/${branchId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/restaurants"] });
+      toast({
+        title: isAr ? "تم حذف الفرع بنجاح" : "Branch deleted successfully",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: isAr ? "فشل حذف الفرع" : "Failed to delete branch",
+        description: error?.message || (isAr ? "لا يمكن حذف الفرع الرئيسي" : "Cannot delete the main branch"),
+        variant: "destructive",
+      });
     },
   });
 
@@ -620,29 +662,7 @@ export default function PlatformAdminPage() {
             </div>
 
             {/* Stats Row 2 - Simplified Summary */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Orders Ready */}
-              <Card>
-                <CardContent className="p-4">
-                  <p className="text-xs font-medium text-muted-foreground mb-3 flex items-center gap-1">
-                    <CheckCircle className="h-3.5 w-3.5" /> {isAr ? "جاهز" : "Ready"}
-                  </p>
-                  <p className="text-2xl font-bold">{stats?.ordersByStatus?.ready || 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">{isAr ? "طلبات جاهزة للاستلام" : "Orders ready for pickup"}</p>
-                </CardContent>
-              </Card>
-
-              {/* Local Orders */}
-              <Card>
-                <CardContent className="p-4">
-                  <p className="text-xs font-medium text-muted-foreground mb-3 flex items-center gap-1">
-                    <MapPin className="h-3.5 w-3.5" /> {isAr ? "محلي" : "Local"}
-                  </p>
-                  <p className="text-2xl font-bold">{stats?.ordersByType?.local || 0}</p>
-                  <p className="text-xs text-muted-foreground mt-1">{isAr ? "طلبات محلية" : "Local orders"}</p>
-                </CardContent>
-              </Card>
-
+            <div className="grid grid-cols-1 md:grid-cols-1 gap-4">
               {/* Subscription Plans */}
               <Card>
                 <CardContent className="p-4">
@@ -815,6 +835,21 @@ export default function PlatformAdminPage() {
                             ) : (
                               <PowerOff className="h-4 w-4" />
                             )}
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (window.confirm(isAr ? `هل أنت متأكد من حذف مطعم "${restaurant.nameAr}"? \n\n⚠️ هذا سيحذف جميع البيانات (الفروع، الطلبات، المنيو، المستخدمين) نهائياً!` : `Are you sure you want to delete "${restaurant.nameEn}"?\n\n⚠️ This will permanently delete all data (branches, orders, menu, users)!`)) {
+                                deleteRestaurantMutation.mutate(restaurant.id);
+                              }
+                            }}
+                            title={isAr ? "حذف المطعم" : "Delete Restaurant"}
+                            data-testid={`button-delete-restaurant-${restaurant.id}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
                           </Button>
                           {expandedId === restaurant.id ? (
                             <ChevronUp className="h-4 w-4 text-muted-foreground" />
@@ -994,37 +1029,7 @@ export default function PlatformAdminPage() {
                           {/* Order Status & Type Breakdown */}
                           {restaurant.ordersCount > 0 && (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div>
-                                <p className="text-xs font-medium text-muted-foreground mb-2">
-                                  {isAr ? "حالة الطلبات" : "Orders by Status"}
-                                </p>
-                                <div className="flex flex-wrap gap-2">
-                                  {Object.entries(restaurant.ordersByStatus).map(([status, count]) => (
-                                    <Badge key={status} variant="outline" className="gap-1">
-                                      <div className={`h-2 w-2 rounded-full ${
-                                        status === "completed" ? "bg-green-500" :
-                                        status === "preparing" ? "bg-amber-500" :
-                                        status === "pending" ? "bg-blue-500" :
-                                        status === "ready" ? "bg-purple-500" :
-                                        status === "cancelled" ? "bg-red-500" : "bg-muted-foreground"
-                                      }`} />
-                                      {isAr ? statusLabelsAr[status] || status : status} ({count})
-                                    </Badge>
-                                  ))}
-                                </div>
-                              </div>
-                              <div>
-                                <p className="text-xs font-medium text-muted-foreground mb-2">
-                                  {isAr ? "أنواع الطلبات" : "Orders by Type"}
-                                </p>
-                                <div className="flex flex-wrap gap-2">
-                                  {Object.entries(restaurant.ordersByType).map(([type, count]) => (
-                                    <Badge key={type} variant="secondary">
-                                      {isAr ? orderTypeLabelsAr[type] || type : type.replace(/_/g, " ")} ({count})
-                                    </Badge>
-                                  ))}
-                                </div>
-                              </div>
+
                             </div>
                           )}
                           {restaurant.branches.length > 0 && (
@@ -1033,15 +1038,33 @@ export default function PlatformAdminPage() {
                                 {isAr ? "الفروع" : "Branches"} ({restaurant.branches.length})
                               </p>
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                {restaurant.branches.map(branch => (
+                                {restaurant.branches.map((branch, branchIndex) => (
                                   <div key={branch.id} className="border rounded-md p-2 bg-background text-sm flex items-center justify-between gap-2">
                                     <div>
                                       <p className="font-medium">{isAr ? (branch.nameAr || branch.name) : branch.name}</p>
                                       {branch.address && <p className="text-xs text-muted-foreground">{branch.address}</p>}
                                     </div>
-                                    <Badge variant={branch.isActive ? "default" : "secondary"}>
-                                      {branch.isActive ? (isAr ? "نشط" : "Active") : (isAr ? "معطل" : "Inactive")}
-                                    </Badge>
+                                    <div className="flex items-center gap-2">
+                                      <Badge variant={branch.isActive ? "default" : "secondary"}>
+                                        {branch.isActive ? (isAr ? "نشط" : "Active") : (isAr ? "معطل" : "Inactive")}
+                                      </Badge>
+                                      {branchIndex > 0 && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                          onClick={() => {
+                                            if (window.confirm(isAr ? `هل أنت متأكد من حذف فرع "${branch.nameAr || branch.name}"?` : `Are you sure you want to delete branch "${branch.name}"?`)) {
+                                              deleteBranchMutation.mutate(branch.id);
+                                            }
+                                          }}
+                                          title={isAr ? "حذف الفرع" : "Delete Branch"}
+                                          data-testid={`button-delete-branch-${branch.id}`}
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </Button>
+                                      )}
+                                    </div>
                                   </div>
                                 ))}
                               </div>

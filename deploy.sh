@@ -43,13 +43,21 @@ fi
 echo "[5/8] Installing dependencies..."
 npm install --production=false
 
-# 6. Create environment file
+# 6. Create environment file (preserve JWT_SECRET across deploys)
 echo "[6/8] Creating environment file..."
+EXISTING_JWT=""
+if [ -f $APP_DIR/.env ]; then
+  EXISTING_JWT=$(grep '^JWT_SECRET=' $APP_DIR/.env | cut -d'=' -f2-)
+fi
+if [ -z "$EXISTING_JWT" ]; then
+  EXISTING_JWT=$(openssl rand -base64 32)
+fi
+
 cat > $APP_DIR/.env << EOF
 DATABASE_URL=$DB_URL
 NODE_ENV=production
 PORT=$PORT
-JWT_SECRET=$(openssl rand -base64 32)
+JWT_SECRET=$EXISTING_JWT
 CORS_ORIGIN=https://$DOMAIN
 EOF
 
@@ -88,7 +96,7 @@ pm2 save
 pm2 startup systemd -u root --hp /root 2>/dev/null || true
 
 # 8. Setup Nginx
-echo "[8/8] Configuring Nginx..."
+echo "[8/9] Configuring Nginx..."
 cat > /etc/nginx/sites-available/trying << NGINXEOF
 server {
     listen 80;
@@ -114,6 +122,12 @@ NGINXEOF
 ln -sf /etc/nginx/sites-available/trying /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
+
+# 9. Setup automated database backups
+echo "[9/9] Setting up automated backups..."
+apt-get install -y postgresql-client
+chmod +x $APP_DIR/backup-db.sh $APP_DIR/restore-db.sh $APP_DIR/setup-backup.sh
+$APP_DIR/setup-backup.sh
 
 echo ""
 echo "========================================="

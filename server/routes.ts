@@ -39,6 +39,7 @@ import {
 } from "./zatca";
 import * as hungerstation from "./hungerstation";
 import * as jahez from "./jahez";
+import { wsManager } from "./websocket";
 import {
   validatePhoneNumber,
   validateEmail,
@@ -757,6 +758,12 @@ export async function registerRoutes(
 
       const phone = rawPhone.toString().replace(/[\s\-\(\)]/g, "").trim();
 
+      // Validate phone number format
+      const phoneValidation = validatePhoneNumber(phone);
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: phoneValidation.error });
+      }
+
       const restaurant = await storage.getRestaurantById(restaurantId);
       if (!restaurant) {
         return res.status(404).json({ error: "Restaurant not found" });
@@ -1301,6 +1308,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "missingFields", message: "Guest count is required" });
       }
 
+      // Validate phone number format
+      const phoneValidation = validatePhoneNumber(req.body.customerPhone);
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: "invalidPhone", message: phoneValidation.error });
+      }
+
       // Reject past reservation dates/times
       const requestedDateTime = new Date(`${req.body.reservationDate.split('T')[0]}T${req.body.reservationTime}:00`);
       if (requestedDateTime <= new Date()) {
@@ -1498,6 +1511,13 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Restaurant not found" });
       }
 
+      // Validate phone number
+      const phone = (req.body.customerPhone || "").toString().trim();
+      const phoneValidation = validatePhoneNumber(phone);
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: phoneValidation.error });
+      }
+
       let validBranchId: string | undefined = undefined;
       if (req.body.branchId) {
         const resolvedBranch = await storage.resolveBranchId(restaurantId, req.body.branchId);
@@ -1517,7 +1537,7 @@ export async function registerRoutes(
         restaurantId,
         branchId: validBranchId || null,
         customerName: req.body.customerName,
-        customerPhone: req.body.customerPhone,
+        customerPhone: phone,
         partySize: parseInt(req.body.partySize) || 1,
         queueNumber,
         estimatedWaitMinutes: estimatedWait,
@@ -2577,6 +2597,13 @@ export async function registerRoutes(
         console.error("Failed to update day session totals:", e);
       }
 
+      // Send real-time notification for new order
+      try {
+        wsManager.notifyNewOrder(order);
+      } catch (e) {
+        console.error("Failed to send WebSocket notification:", e);
+      }
+
       res.status(201).json(order);
     } catch (error: any) {
       console.error("Order creation error:", error);
@@ -2604,6 +2631,16 @@ export async function registerRoutes(
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+
+      // Send real-time notification if status was changed
+      if (safeData.status && safeData.status !== existingOrder.status) {
+        try {
+          wsManager.notifyOrderStatusChange(order, existingOrder.status || 'created', safeData.status);
+        } catch (e) {
+          console.error("Failed to send WebSocket notification:", e);
+        }
+      }
+
       res.json(order);
     } catch (error: any) {
       if (error?.message?.includes("not found")) return res.status(404).json({ error: error.message });
@@ -2614,11 +2651,14 @@ export async function registerRoutes(
   app.put("/api/orders/:id/status", async (req, res) => {
     try {
       const { status } = req.body;
+      console.log(`[Order Status] Updating order ${req.params.id} to status: ${status}`);
+      
       if (!status) {
         return res.status(400).json({ error: "Status is required" });
       }
-      const validStatuses = ["pending", "preparing", "ready", "completed", "cancelled", "payment_pending", "delivered"];
+      const validStatuses = ["created", "pending", "confirmed", "preparing", "ready", "completed", "delivered", "cancelled"];
       if (!validStatuses.includes(status)) {
+        console.error(`[Order Status] Invalid status: ${status}`);
         return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(", ")}` });
       }
       
@@ -2628,105 +2668,8 @@ export async function registerRoutes(
       }
       await verifyOwnership(req, existingOrder, "Order");
       
-      if (status === "cancelled" && existingOrder.tableId) {
+      if ((status === "delivered" || status === "completed") && existingOrder.tableId) {
         await storage.updateTableStatus(existingOrder.tableId, "available");
-      }
-      if (status === "completed" && existingOrder.tableId && existingOrder.isPaid) {
-        await storage.updateTableStatus(existingOrder.tableId, "available");
-      }
-      
-      // ZATCA compliance: if cancelling an order that has an invoice, auto-issue credit note
-      let creditNote = null;
-      if (status === "cancelled") {
-        const existingInvoice = await storage.getInvoiceByOrder(req.params.id);
-        if (existingInvoice && existingInvoice.invoiceType !== 'credit_note' && existingInvoice.status !== 'cancelled') {
-          // Skip if credit note already exists for this invoice
-          const alreadyRefunded = await storage.getCreditNoteForInvoice(existingInvoice.id);
-          if (alreadyRefunded) {
-            creditNote = alreadyRefunded;
-          } else {
-          const restaurantId = existingOrder.restaurantId;
-          const restaurant = await storage.getRestaurantById(restaurantId);
-          if (restaurant) {
-            const reason = req.body.reason || "إلغاء الطلب - Order Cancelled";
-            const orderItems = await storage.getOrderItems(req.params.id);
-            const menuItemsRaw = await storage.getMenuItems(restaurantId);
-            const menuItemsMap = new Map(menuItemsRaw.map(m => [m.id, m]));
-
-            try {
-              const zatcaResult = await buildZatcaInvoice(
-                restaurant, existingOrder, orderItems, menuItemsMap, 'credit_note', existingInvoice, undefined, reason
-              );
-
-              creditNote = await storage.createInvoice({
-                restaurantId,
-                branchId: existingOrder.branchId || null,
-                orderId: existingOrder.id,
-                invoiceNumber: zatcaResult.invoiceNumber,
-                invoiceType: 'credit_note',
-                subtotal: zatcaResult.subtotal,
-                taxRate: zatcaResult.taxRate,
-                taxAmount: zatcaResult.taxAmount,
-                total: zatcaResult.total,
-                discount: zatcaResult.discount,
-                deliveryFee: zatcaResult.deliveryFee,
-                qrCodeData: zatcaResult.qrData,
-                xmlContent: zatcaResult.xmlContent,
-                invoiceHash: zatcaResult.invoiceHash,
-                previousInvoiceHash: zatcaResult.previousInvoiceHash,
-                invoiceCounter: zatcaResult.invoiceCounter,
-                uuid: zatcaResult.uuid,
-                relatedInvoiceId: existingInvoice.id,
-                status: 'issued',
-                zatcaStatus: 'pending',
-                cashierName: req.body.userName || null,
-                refundReason: reason,
-                customerName: existingInvoice.customerName,
-                customerPhone: existingInvoice.customerPhone,
-                paymentMethod: existingInvoice.paymentMethod,
-                isPaid: existingInvoice.isPaid,
-                signedXml: zatcaResult.signedXml || null,
-              });
-
-              // Return inventory items to stock
-              for (const item of orderItems) {
-                const menuItem = menuItemsMap.get(item.menuItemId);
-                if (menuItem) {
-                  const recipeItems = await storage.getRecipes(item.menuItemId);
-                  for (const recipe of recipeItems) {
-                    const invItem = await storage.getInventoryItem(recipe.inventoryItemId);
-                    if (invItem) {
-                      const returnQty = parseFloat(String(recipe.quantity)) * (item.quantity || 1);
-                      await storage.updateInventoryItem(recipe.inventoryItemId, {
-                        currentStock: String(parseFloat(String(invItem.currentStock)) + returnQty),
-                      } as any);
-                    }
-                  }
-                }
-              }
-
-              // Audit log for credit note
-              const userIp = req.ip || req.headers['x-forwarded-for'] as string || 'unknown';
-              await storage.createInvoiceAuditLog({
-                restaurantId,
-                invoiceId: creditNote.id,
-                action: 'cancel_credit_note',
-                userName: req.body.userName || 'System',
-                details: JSON.stringify({
-                  reason,
-                  originalInvoiceId: existingInvoice.id,
-                  originalInvoiceNumber: existingInvoice.invoiceNumber,
-                  amount: zatcaResult.total,
-                }),
-                ipAddress: userIp,
-              });
-            } catch (e) {
-              console.error("Auto credit note on cancel failed:", e);
-              // Don't block the cancellation, but log the error
-            }
-          }
-          } // end else (no existing credit note)
-        }
       }
       
       const order = await storage.updateOrderStatus(req.params.id, status);
@@ -2743,9 +2686,18 @@ export async function registerRoutes(
           restaurantId: existingOrder.restaurantId,
         });
       } catch (e) {}
+
+      // Send real-time notification for order status change
+      try {
+        wsManager.notifyOrderStatusChange(order, existingOrder.status || 'created', status);
+      } catch (e) {
+        console.error("Failed to send WebSocket notification:", e);
+      }
       
-      res.json({ ...order, creditNote });
+      console.log(`[Order Status] Successfully updated order ${req.params.id} to ${status}`);
+      res.json(order);
     } catch (error) {
+      console.error(`[Order Status] Error updating order ${req.params.id}:`, error);
       res.status(500).json({ error: "Failed to update order status" });
     }
   });
@@ -3438,17 +3390,43 @@ export async function registerRoutes(
   // Kitchen orders - get orders for kitchen display (pending, confirmed, preparing) with items
   app.get("/api/kitchen/orders", async (req, res) => {
     try {
+      const restaurantId = await getRestaurantId(req);
       const branchId = req.query.branch as string | undefined;
       const sectionId = req.query.section as string | undefined;
-      const allOrders = await storage.getOrders(await getRestaurantId(req), branchId);
-      const kitchenOrders = allOrders.filter(o => 
-        ["pending", "confirmed", "preparing"].includes(o.status || "")
+      const allOrders = await storage.getOrders(restaurantId, branchId);
+      
+      console.log(`[Kitchen] Fetching orders for restaurant ${restaurantId}, branch ${branchId || 'all'}, section ${sectionId || 'all'}`);
+      console.log(`[Kitchen] Total orders: ${allOrders.length}`);
+      
+      // Log all order statuses for debugging
+      const statusCounts: Record<string, number> = {};
+      for (const o of allOrders) {
+        statusCounts[o.status || 'null'] = (statusCounts[o.status || 'null'] || 0) + 1;
+      }
+      console.log(`[Kitchen] Order statuses:`, JSON.stringify(statusCounts));
+      
+      // Auto-timeout: orders that are "created"/"pending" for 60+ minutes become "ready" automatically
+      const now = new Date();
+      const sixtyMinsAgo = new Date(now.getTime() - 60 * 60000);
+      
+      for (const order of allOrders) {
+        if ((order.status === "created" || order.status === "pending") && new Date(order.createdAt) < sixtyMinsAgo) {
+          await storage.updateOrderStatus(order.id, "ready");
+        }
+      }
+      
+      // Re-fetch after auto-updates
+      const updatedOrders = await storage.getOrders(restaurantId, branchId);
+      const kitchenOrders = updatedOrders.filter(o => 
+        ["created", "pending", "confirmed", "preparing", "ready"].includes(o.status || "")
       );
       
-      const menuItemsData = await storage.getMenuItems(await getRestaurantId(req));
+      console.log(`[Kitchen] Kitchen orders (active): ${kitchenOrders.length}, statuses: ${kitchenOrders.map(o => o.status).join(', ')}`);
+      
+      const menuItemsData = await storage.getMenuItems(restaurantId);
       const menuItemsMap = new Map(menuItemsData.map(m => [m.id, m]));
       
-      const tablesData = await storage.getTables(await getRestaurantId(req), branchId);
+      const tablesData = await storage.getTables(restaurantId, branchId);
       const tablesMap = new Map(tablesData.map(t => [t.id, t]));
       
       const ordersWithItems = await Promise.all(
@@ -3462,11 +3440,17 @@ export async function registerRoutes(
               : (item.itemName ? { nameEn: item.itemName, nameAr: item.itemName, price: item.unitPrice, kitchenSectionId: null } as any : null),
           }));
           
-          // Filter items by section if sectionId is provided (only for items with menuItem)
+          // Filter items by section if sectionId is provided
           if (sectionId) {
-            itemsWithDetails = itemsWithDetails.filter(item => 
-              !item.menuItemId || item.menuItem?.kitchenSectionId === sectionId
-            );
+            itemsWithDetails = itemsWithDetails.filter(item => {
+              // Include items without menuItemId (manual items)
+              if (!item.menuItemId) return true;
+              // Include items with matching section
+              if (item.menuItem?.kitchenSectionId === sectionId) return true;
+              // Include items without section assignment
+              if (!item.menuItem?.kitchenSectionId) return true;
+              return false;
+            });
           }
           
           const table = order.tableId ? tablesMap.get(order.tableId) : null;
@@ -3478,13 +3462,16 @@ export async function registerRoutes(
         })
       );
       
-      // Remove orders with no items (after section filtering) — but keep delivery orders even if 0 items
-      const filteredOrders = ordersWithItems.filter(order => 
-        order.items.length > 0 || order.orderType === "delivery"
-      );
+      // Remove orders with no items ONLY if section filter is active
+      const filteredOrders = sectionId 
+        ? ordersWithItems.filter(order => order.items.length > 0)
+        : ordersWithItems;
+      
+      console.log(`[Kitchen] Final orders returned: ${filteredOrders.length}`);
       
       res.json(filteredOrders);
     } catch (error) {
+      console.error("[Kitchen] Error fetching orders:", error);
       res.status(500).json({ error: "Failed to get kitchen orders" });
     }
   });
@@ -4028,6 +4015,154 @@ export async function registerRoutes(
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: "Failed to get summary" });
+    }
+  });
+
+  // ===============================
+  // DAY SESSIONS REPORTS - تقارير الشفتات
+  // ===============================
+  
+  // تقرير جميع الشفتات المغلقة
+  app.get("/api/reports/day-sessions", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const startDate = req.query.startDate as string | undefined;
+      const endDate = req.query.endDate as string | undefined;
+      const status = req.query.status as string || "closed"; // closed, open, all
+      
+      // جلب الشفتات
+      let sessions = await storage.getDaySessions(restaurantId, branchId);
+      
+      // فلترة حسب الحالة
+      if (status !== "all") {
+        sessions = sessions.filter((s: any) => s.status === status);
+      }
+      
+      // فلترة حسب التاريخ
+      if (startDate) {
+        sessions = sessions.filter((s: any) => s.date >= startDate);
+      }
+      if (endDate) {
+        sessions = sessions.filter((s: any) => s.date <= endDate);
+      }
+      
+      // حساب الإجماليات
+      const totals = sessions.reduce((acc: any, s: any) => ({
+        totalSales: acc.totalSales + parseFloat(s.totalSales || 0),
+        totalOrders: acc.totalOrders + parseInt(s.totalOrders || 0),
+        cashSales: acc.cashSales + parseFloat(s.cashSales || 0),
+        cardSales: acc.cardSales + parseFloat(s.cardSales || 0),
+        totalDifference: acc.totalDifference + parseFloat(s.difference || 0),
+        sessionsCount: acc.sessionsCount + 1,
+      }), { totalSales: 0, totalOrders: 0, cashSales: 0, cardSales: 0, totalDifference: 0, sessionsCount: 0 });
+      
+      res.json({
+        sessions,
+        totals,
+      });
+    } catch (error) {
+      console.error("Day sessions report error:", error);
+      res.status(500).json({ error: "Failed to get day sessions report" });
+    }
+  });
+
+  // ملخص الشفتات الشهري
+  app.get("/api/reports/day-sessions/monthly-summary", async (req, res) => {
+    try {
+      const restaurantId = await getRestaurantId(req);
+      const branchId = req.query.branch as string | undefined;
+      const year = parseInt(req.query.year as string) || new Date().getFullYear();
+      const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
+      
+      // جلب الشفتات لهذا الشهر
+      const startDate = `${year}-${month.toString().padStart(2, '0')}-01`;
+      const endDate = `${year}-${month.toString().padStart(2, '0')}-31`;
+      
+      let sessions = await storage.getDaySessions(restaurantId, branchId);
+      sessions = sessions.filter((s: any) => s.date >= startDate && s.date <= endDate && s.status === "closed");
+      
+      // تجميع حسب اليوم
+      const dailyData = sessions.map((s: any) => ({
+        date: s.date,
+        totalSales: parseFloat(s.totalSales || 0),
+        totalOrders: parseInt(s.totalOrders || 0),
+        cashSales: parseFloat(s.cashSales || 0),
+        cardSales: parseFloat(s.cardSales || 0),
+        difference: parseFloat(s.difference || 0),
+        openingBalance: parseFloat(s.openingBalance || 0),
+        closingBalance: parseFloat(s.closingBalance || 0),
+      }));
+      
+      // الإجمالي
+      const summary = {
+        year,
+        month,
+        daysWorked: sessions.length,
+        totalSales: dailyData.reduce((sum, d) => sum + d.totalSales, 0),
+        totalOrders: dailyData.reduce((sum, d) => sum + d.totalOrders, 0),
+        cashSales: dailyData.reduce((sum, d) => sum + d.cashSales, 0),
+        cardSales: dailyData.reduce((sum, d) => sum + d.cardSales, 0),
+        totalDifference: dailyData.reduce((sum, d) => sum + d.difference, 0),
+        averageDailySales: sessions.length > 0 ? dailyData.reduce((sum, d) => sum + d.totalSales, 0) / sessions.length : 0,
+        averageDailyOrders: sessions.length > 0 ? Math.round(dailyData.reduce((sum, d) => sum + d.totalOrders, 0) / sessions.length) : 0,
+      };
+      
+      res.json({
+        summary,
+        dailyData,
+      });
+    } catch (error) {
+      console.error("Monthly summary error:", error);
+      res.status(500).json({ error: "Failed to get monthly summary" });
+    }
+  });
+
+  // تفاصيل شفت واحد مع التحويلات
+  app.get("/api/reports/day-sessions/:id/details", async (req, res) => {
+    try {
+      const session = await storage.getDaySession(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      await verifyOwnership(req, session, "Day session");
+      
+      // جلب التحويلات النقدية
+      const transactions = await storage.getCashTransactions(req.params.id);
+      
+      // جلب الطلبات لهذا اليوم
+      const restaurantId = await getRestaurantId(req);
+      const sessionDate = new Date(session.date);
+      const nextDay = new Date(sessionDate);
+      nextDay.setDate(nextDay.getDate() + 1);
+      
+      const orders = await storage.getOrders(restaurantId, session.branchId || undefined);
+      const sessionOrders = orders.filter((o: any) => {
+        const orderDate = new Date(o.createdAt);
+        return orderDate >= sessionDate && orderDate < nextDay;
+      });
+      
+      // تفصيل طرق الدفع
+      const paymentBreakdown = sessionOrders.reduce((acc: any, o: any) => {
+        const method = o.paymentMethod || 'cash';
+        if (!acc[method]) {
+          acc[method] = { count: 0, total: 0 };
+        }
+        acc[method].count += 1;
+        acc[method].total += parseFloat(o.total || 0);
+        return acc;
+      }, {});
+      
+      res.json({
+        session,
+        transactions,
+        ordersCount: sessionOrders.length,
+        paymentBreakdown,
+      });
+    } catch (error: any) {
+      if (error?.message?.includes("not found")) return res.status(404).json({ error: error.message });
+      console.error("Session details error:", error);
+      res.status(500).json({ error: "Failed to get session details" });
     }
   });
 
@@ -5548,6 +5683,16 @@ export async function registerRoutes(
 
   app.post("/api/queue", async (req, res) => {
     try {
+      // Validate phone number if provided
+      if (req.body.customerPhone) {
+        const phone = req.body.customerPhone.toString().trim();
+        const phoneValidation = validatePhoneNumber(phone);
+        if (!phoneValidation.valid) {
+          return res.status(400).json({ error: phoneValidation.error });
+        }
+        req.body.customerPhone = phone;
+      }
+
       const branchId = req.body.branchId as string | undefined;
       const queueNumber = await storage.getNextQueueNumber(await getRestaurantId(req), branchId);
       const estimatedWait = await storage.getEstimatedWaitTime(await getRestaurantId(req), branchId);
@@ -8898,6 +9043,77 @@ export async function registerRoutes(
       res.json(closed);
     } catch (error: any) {
       res.status(400).json({ error: "Failed to close day session", details: error?.message });
+    }
+  });
+
+  // Delete restaurant (Platform Admin Only)
+  app.delete("/api/restaurants/:restaurantId", async (req, res) => {
+    try {
+      const user = await getAuthenticatedUser(req);
+
+      // Only platform admin can delete restaurants
+      if (user.role !== "platform_admin") {
+        return res.status(403).json({ error: "Only platform administrators can delete restaurants" });
+      }
+
+      const restaurantId = req.params.restaurantId;
+      if (!restaurantId) {
+        return res.status(400).json({ error: "Restaurant ID required" });
+      }
+
+      // Helper function to safely execute delete (ignores table/column not found errors)
+      const safeDelete = async (query: any) => {
+        try {
+          await db.execute(query);
+        } catch (err: any) {
+          // Ignore "relation does not exist" (42P01) and "column does not exist" (42703) errors
+          if (err?.code !== '42P01' && err?.code !== '42703') {
+            throw err;
+          }
+        }
+      };
+
+      // Delete restaurant and cascade delete all related data (sequential deletes)
+      await safeDelete(sql`DELETE FROM order_audit_logs WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM invoice_audit_logs WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM invoices WHERE order_id IN (SELECT id FROM orders WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM order_item_customizations WHERE order_item_id IN (SELECT oi.id FROM order_items oi JOIN orders o ON oi.order_id = o.id WHERE o.restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM orders WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM recipes WHERE menu_item_id IN (SELECT id FROM menu_items WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM menu_item_customizations WHERE menu_item_id IN (SELECT id FROM menu_items WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM menu_item_variants WHERE menu_item_id IN (SELECT id FROM menu_items WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM menu_items WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM customization_options WHERE group_id IN (SELECT id FROM customization_groups WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM customization_groups WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM categories WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM kitchen_sections WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM tables WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM day_sessions WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM cash_transactions WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM printers WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM inventory_transactions WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM inventory_items WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM promotions WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM coupon_usage WHERE coupon_id IN (SELECT id FROM coupons WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM coupons WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM reviews WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM queue_entries WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM queue_counters WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM customers WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM notifications WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM notification_settings WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM delivery_orders WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM delivery_integrations WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM reservations WHERE branch_id IN (SELECT id FROM branches WHERE restaurant_id = ${restaurantId})`);
+      await safeDelete(sql`DELETE FROM users WHERE restaurant_id = ${restaurantId} AND role != 'platform_admin'`);
+      await safeDelete(sql`DELETE FROM branches WHERE restaurant_id = ${restaurantId}`);
+      await safeDelete(sql`DELETE FROM restaurants WHERE id = ${restaurantId}`);
+
+      res.json({ success: true, message: "Restaurant deleted" });
+    } catch (error: any) {
+      console.error("Failed to delete restaurant:", error);
+      res.status(500).json({ error: "Failed to delete restaurant" });
     }
   });
 

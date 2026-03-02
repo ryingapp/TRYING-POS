@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ArrowLeft, ArrowRight, Users, Check, Globe, ChefHat, Loader2, Clock, Hash } from "lucide-react";
+import { PhoneInput } from "@/components/phone-input";
+import { ArrowLeft, ArrowRight, Users, Check, Globe, ChefHat, Loader2, Clock, Hash, MessageCircle } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { useToast } from "@/hooks/use-toast";
 
@@ -63,6 +64,7 @@ export default function PublicQueuePage() {
       waitNote: { en: "We'll call your name when your table is ready. Please stay nearby.", ar: "سننادي اسمك لما تجهز طاولتك. الرجاء البقاء بالقرب." },
       backToHome: { en: "Back to Home", ar: "العودة للرئيسية" },
       browseMenu: { en: "Browse Menu While Waiting", ar: "تصفح المنيو أثناء الانتظار" },
+      sendWhatsApp: { en: "Send WhatsApp Reminder", ar: "أرسل تذكير عبر واتساب" },
       required: { en: "Please fill in all required fields", ar: "يرجى تعبئة جميع الحقول المطلوبة" },
       error: { en: "Failed to join queue", ar: "فشل في التسجيل بالطابور" },
       restaurantNotFound: { en: "Restaurant not found", ar: "المطعم غير موجود" },
@@ -107,8 +109,17 @@ export default function PublicQueuePage() {
   });
 
   const handleSubmit = () => {
-    if (!customerName || !customerPhone) {
+    if (!customerName) {
       toast({ title: t("required"), variant: "destructive" });
+      return;
+    }
+    // Check if phone is valid (exactly 10 digits, starts with 05)
+    const sanitizedPhone = customerPhone.replace(/\D/g, "");
+    if (sanitizedPhone.length !== 10 || !sanitizedPhone.startsWith("05")) {
+      toast({
+        title: language === "ar" ? "رقم جوال غير صحيح" : "Invalid phone number",
+        variant: "destructive",
+      });
       return;
     }
     joinQueue.mutate();
@@ -256,16 +267,15 @@ export default function PublicQueuePage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label>{t("phone")} *</Label>
-              <Input
-                type="tel"
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                placeholder={t("phonePlaceholder")}
-                dir="ltr"
-              />
-            </div>
+            <PhoneInput
+              value={customerPhone}
+              onChange={setCustomerPhone}
+              label={t("phone")}
+              placeholder={t("phonePlaceholder")}
+              required
+              showValidation={true}
+              language={language as "en" | "ar"}
+            />
 
             <div className="space-y-2">
               <Label>{t("partySize")}</Label>

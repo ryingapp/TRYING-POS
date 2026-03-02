@@ -60,6 +60,7 @@ import {
   CheckCircle,
   XCircle,
   Bell,
+  MessageCircle,
   UserPlus,
   LayoutGrid,
   BookOpen,
@@ -1170,6 +1171,11 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
     queryKey: [`/api/queue/stats${branchParam}`],
   });
 
+  // Fetch restaurant info for WhatsApp message
+  const { data: restaurant } = useQuery<any>({
+    queryKey: ["/api/restaurant"],
+  });
+
   const addToQueueMutation = useMutation({
     mutationFn: async (data: typeof formData) => {
       const response = await fetch("/api/queue", {
@@ -1209,22 +1215,39 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
     },
   });
 
-  const notifyMutation = useMutation({
-    mutationFn: async (id: string) => {
-      const response = await fetch(`/api/queue/${id}/notify`, {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error("Failed to notify");
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
-      toast({
-        title: language === "ar" ? "تم الإشعار" : "Notified",
-        description: language === "ar" ? "تم إشعار العميل" : "Customer notified",
-      });
-    },
-  });
+  // WhatsApp notify - opens directly on click
+  const handleNotify = (entry: QueueEntry) => {
+    const phone = entry.customerPhone.replace(/\D/g, "");
+    const intlPhone = phone.startsWith("0") ? "966" + phone.slice(1) : "966" + phone;
+    const rNameAr = restaurant?.nameAr || "المطعم";
+    const rNameEn = restaurant?.nameEn || "Restaurant";
+    const rPhone = restaurant?.phone || "";
+    const rAddress = restaurant?.address || "";
+    const lines = [
+      `مرحباً ${entry.customerName} 👋`,
+      ``,
+      `دورك جاء! رقمك في الطابور: *#${entry.queueNumber}*`,
+      `يرجى التوجه للمطعم الآن 🏃`,
+      ``,
+      `─────────────`,
+      ``,
+      `Hello ${entry.customerName} 👋`,
+      ``,
+      `It's your turn! Queue number: *#${entry.queueNumber}*`,
+      `Please come to the restaurant now 🏃`,
+      ``,
+      `─────────────`,
+      `🍽️ *${rNameAr}* | *${rNameEn}*`,
+    ];
+    if (rPhone) lines.push(`📞 ${rPhone}`);
+    if (rAddress) lines.push(`📍 ${rAddress}`);
+    const msg = lines.join("\n");
+    window.open(`https://wa.me/${intlPhone}?text=${encodeURIComponent(msg)}`, "_blank");
+    // Update status in background
+    fetch(`/api/queue/${entry.id}/notify`, { method: "POST" })
+      .then(() => queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/queue") }))
+      .catch(() => {});
+  };
 
   const getStatusBadge = (status: string) => {
     const statusConfig: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
@@ -1465,16 +1488,17 @@ function QueueTab({ language, branchId }: { language: string; branchId: string |
                   </div>
 
                   <div className="flex items-center gap-2 border-t p-3 bg-muted/30">
-                    {entry.status === "waiting" && (
+                    {(entry.status === "waiting" || entry.status === "notified") && (
                       <Button
                         size="sm"
                         variant="outline"
                         className="flex-1"
-                        onClick={() => notifyMutation.mutate(entry.id)}
+                        style={{ backgroundColor: '#16a34a', borderColor: '#16a34a', color: '#fff' }}
+                        onClick={() => handleNotify(entry)}
                         data-testid={`button-notify-${entry.id}`}
                       >
-                        <Bell className="h-4 w-4 me-1" />
-                        {language === "ar" ? "إشعار" : "Notify"}
+                        <MessageCircle className="h-4 w-4 me-1" />
+                        {language === "ar" ? "نادِه" : "Notify"}
                       </Button>
                     )}
                     <Button
