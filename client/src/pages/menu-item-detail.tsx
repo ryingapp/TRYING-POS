@@ -113,8 +113,10 @@ export default function MenuItemDetailPage() {
       cartItems.push(cartAdd);
     }
     localStorage.setItem(`cart_${restaurantId}`, JSON.stringify(cartItems));
-    // Navigate back to menu
-    setLocation(`/m/${restaurantId}/menu`);
+    // Navigate back to menu (preserve table URL if available)
+    const returnUrl = localStorage.getItem(`return_url_${restaurantId}`) || `/m/${restaurantId}/menu`;
+    localStorage.removeItem(`return_url_${restaurantId}`);
+    setLocation(returnUrl);
   };
 
   const handleShare = async () => {
@@ -151,7 +153,11 @@ export default function MenuItemDetailPage() {
           <h2 className={`text-xl font-bold ${d ? 'text-white/60' : 'text-gray-600'}`}>
             {language === "ar" ? "الصنف غير موجود" : "Item not found"}
           </h2>
-          <Button variant="outline" className={`mt-4 rounded-xl ${d ? 'border-white/[0.08] text-white/70 hover:bg-white/[0.05]' : 'border-gray-200/60 text-gray-600 hover:bg-gray-100'}`} onClick={() => setLocation(`/m/${restaurantId}/menu`)}>
+          <Button variant="outline" className={`mt-4 rounded-xl ${d ? 'border-white/[0.08] text-white/70 hover:bg-white/[0.05]' : 'border-gray-200/60 text-gray-600 hover:bg-gray-100'}`} onClick={() => {
+            const returnUrl = localStorage.getItem(`return_url_${restaurantId}`) || `/m/${restaurantId}/menu`;
+            localStorage.removeItem(`return_url_${restaurantId}`);
+            setLocation(returnUrl);
+          }}>
             {language === "ar" ? "العودة للقائمة" : "Back to Menu"}
           </Button>
         </div>
@@ -182,7 +188,11 @@ export default function MenuItemDetailPage() {
         {/* Top bar */}
         <div className="absolute top-0 left-0 right-0 p-3.5 flex items-center justify-between z-10">
           <button
-            onClick={() => setLocation(`/m/${restaurantId}/menu`)}
+            onClick={() => {
+              const returnUrl = localStorage.getItem(`return_url_${restaurantId}`) || `/m/${restaurantId}/menu`;
+              localStorage.removeItem(`return_url_${restaurantId}`);
+              setLocation(returnUrl);
+            }}
             className="w-10 h-10 rounded-xl bg-black/25 backdrop-blur-md flex items-center justify-center border border-white/10 hover:bg-black/40 transition-colors"
           >
             {direction === "rtl" ? <ArrowRight className="h-5 w-5 text-white" /> : <ArrowLeft className="h-5 w-5 text-white" />}

@@ -26,7 +26,7 @@ import {
   Search, Plus, Minus, Trash2, ShoppingCart, CreditCard, 
   Banknote, Smartphone, Apple, Building2, UtensilsCrossed,
   Car, Bike, X, Check, Receipt, Nfc, CheckCircle,
-  Play, Square, Clock, Wallet, DollarSign, Users, CircleDollarSign, Printer
+  Play, Square, Clock, Wallet, DollarSign, Users, CircleDollarSign, Printer, QrCode
 } from "lucide-react";
 import type { MenuItem, Category, Table, Order, OrderItem, Invoice, DaySession, CashTransaction } from "@shared/schema";
 
@@ -301,6 +301,20 @@ export default function POSPage() {
     tables?.filter(t => t.status === "occupied") || [], 
     [tables]
   );
+
+  // Pending QR table orders that need cashier confirmation
+  const pendingQROrders = useMemo(() => {
+    if (!allOrders || !tables) return [];
+    return allOrders.filter(o => 
+      o.status === "pending" && 
+      o.paymentMethod === "pending" && 
+      o.orderType === "dine_in" &&
+      o.tableId
+    ).map(o => {
+      const table = tables.find(t => t.id === o.tableId);
+      return { ...o, tableName: table?.name || table?.tableNumber || "طاولة" };
+    });
+  }, [allOrders, tables]);
 
   const isDineInWithTable = orderType === "dine_in" && selectedTable && selectedTable !== "none";
 
@@ -735,6 +749,61 @@ export default function POSPage() {
             </Button>
           ))}
         </div>
+
+        {/* Pending QR Table Orders - Need Cashier Confirmation */}
+        {pendingQROrders.length > 0 && (
+          <div className="mb-3 p-3 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+              <QrCode className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+              <span className="text-sm font-semibold text-amber-700 dark:text-amber-400">
+                {language === "ar" ? `طلبات QR جديدة (${pendingQROrders.length})` : `New QR Orders (${pendingQROrders.length})`}
+              </span>
+            </div>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {pendingQROrders.map((order) => (
+                <div
+                  key={order.id}
+                  className="flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg border border-amber-300 dark:border-amber-700 p-3 min-w-[160px] space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
+                      #{order.orderNumber}
+                    </span>
+                    <Badge className="bg-amber-500 text-white text-[10px]">
+                      {order.tableName}
+                    </Badge>
+                  </div>
+                  <p className="text-sm font-bold">
+                    {parseFloat(order.total || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                  </p>
+                  {order.customerName && (
+                    <p className="text-xs text-muted-foreground truncate">{order.customerName}</p>
+                  )}
+                  <Button
+                    size="sm"
+                    className="w-full gap-1.5 bg-green-600 hover:bg-green-700 text-white h-8"
+                    onClick={async () => {
+                      try {
+                        await apiRequest("PUT", `/api/orders/${order.id}/status`, { status: "confirmed" });
+                        queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).includes("/api/orders") });
+                        toast({
+                          title: language === "ar" ? "تم تأكيد الطلب" : "Order Confirmed",
+                          description: language === "ar" ? "العميل يقدر يدفع الآن" : "Customer can pay now",
+                        });
+                      } catch {
+                        toast({ title: language === "ar" ? "خطأ" : "Error", variant: "destructive" });
+                      }
+                    }}
+                  >
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    {language === "ar" ? "تأكيد" : "Confirm"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {occupiedTables.length > 0 && (
           <div className="mb-2">

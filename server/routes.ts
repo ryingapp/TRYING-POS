@@ -1240,6 +1240,8 @@ export async function registerRoutes(
           isPaid: order.isPaid,
           createdAt: order.createdAt,
           items: itemsWithDetails,
+          tableName: table?.name || null,
+          tableNumber: table?.tableNumber || table?.name || null,
         },
       });
     } catch (error) {

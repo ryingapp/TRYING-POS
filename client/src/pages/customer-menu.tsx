@@ -649,6 +649,12 @@ export default function CustomerMenuPage() {
 
   const submitOrder = () => {
     setShowConfirmation(false);
+    // For dine_in with tableId, use "pending" payment method to wait for cashier confirmation
+    const isDineInTable = orderType === "dine_in" && tableId;
+    const finalPaymentMethod = isDineInTable 
+      ? "pending" 
+      : (paymentMethod === "tap_to_pay" ? "edfapay_online" : "cash");
+    
     placeOrderMutation.mutate({
       orderType,
       tableId: tableId || null,
@@ -656,7 +662,7 @@ export default function CustomerMenuPage() {
       customerPhone,
       customerAddress,
       kitchenNotes,
-      paymentMethod: paymentMethod === "tap_to_pay" ? "edfapay_online" : "cash",
+      paymentMethod: finalPaymentMethod,
       items: cart.map((c) => {
         const unitPrice = getItemPrice(c);
         return {
@@ -676,7 +682,8 @@ export default function CustomerMenuPage() {
 
   const activeOrder = activeOrderData?.hasActiveOrder ? activeOrderData.order : null;
 
-  if (isPublic && tableId && loggedInCustomer && activeOrder && !activeOrder.isPaid) {
+  // Show active order view if there's an active order (don't require loggedInCustomer)
+  if (isPublic && tableId && activeOrder && !activeOrder.isPaid) {
     const orderTotal = parseFloat(activeOrder.total || "0");
     const statusText = (s: string) => {
       const map: Record<string, { en: string; ar: string }> = {
@@ -1425,7 +1432,15 @@ export default function CustomerMenuPage() {
                 {/* Menu item row */}
                 <div
                   className={`flex gap-3 ${d ? 'bg-[#1a1a1a] border-white/[0.04]' : 'bg-white border-gray-100 shadow-sm'} border rounded-xl p-3 ${!item.isAvailable ? "opacity-30 pointer-events-none" : "cursor-pointer active:scale-[0.99]"} transition-transform`}
-                  onClick={() => item.isAvailable && setLocation(`/m/${restaurantId}/item/${item.id}`)}
+                  onClick={() => {
+                    if (!item.isAvailable) return;
+                    // Store return URL with table info for item detail page
+                    const currentUrl = tableId 
+                      ? `/m/${restaurantId}/table/${tableId}${window.location.search}`
+                      : `/m/${restaurantId}/menu`;
+                    localStorage.setItem(`return_url_${restaurantId}`, currentUrl);
+                    setLocation(`/m/${restaurantId}/item/${item.id}`);
+                  }}
                   data-testid={`card-menu-item-${item.id}`}
                 >
                   {/* Image */}
