@@ -934,6 +934,23 @@ export async function registerRoutes(
 
       const data = insertOrderSchema.parse(cleanBody);
 
+      // إذا كان طلب من طاولة (dine_in + tableId)، يكون status = pending حتى الكاشير يوافق
+      const isDineInTableOrder = data.orderType === "dine_in" && data.tableId;
+      if (isDineInTableOrder) {
+        (data as any).status = "pending"; // الطلب معلق حتى موافقة الكاشير
+        
+        // منع التعارض: تحقق إذا الطاولة فيها طلب نشط
+        const existingOrder = await storage.getActiveOrderByTable(data.tableId);
+        if (existingOrder) {
+          return res.status(400).json({ 
+            error: "Table has an active order",
+            errorAr: "الطاولة لديها طلب نشط",
+            orderId: existingOrder.id,
+            orderNumber: existingOrder.orderNumber
+          });
+        }
+      }
+
       if (data.orderType === "dine_in" && data.tableId) {
         const tbl = await storage.getTable(data.tableId);
         if (tbl && tbl.restaurantId === restaurantId) {

@@ -431,12 +431,24 @@ export default function CustomerMenuPage() {
         setLocation(isPublic ? `/m/${restaurantId}/order-status/${order.id}` : `/order-status/${order.id}`);
       }
     },
-    onError: () => {
-      toast({
-        variant: "destructive",
-        title: t("error"),
-        description: t("orderFailed"),
-      });
+    onError: (error: any) => {
+      // التعامل مع خطأ تعارض الطاولة
+      if (error?.error === "Table has an active order") {
+        toast({
+          variant: "destructive",
+          title: language === "ar" ? "الطاولة مشغولة" : "Table Occupied",
+          description: language === "ar" 
+            ? "الطاولة لديها طلب نشط. يرجى الانتظار أو التواصل مع الموظف." 
+            : "This table has an active order. Please wait or contact staff.",
+        });
+        refetchActiveOrder();
+      } else {
+        toast({
+          variant: "destructive",
+          title: t("error"),
+          description: t("orderFailed"),
+        });
+      }
     },
   });
 
@@ -749,17 +761,34 @@ export default function CustomerMenuPage() {
               </div>
           </div>
 
-          <Button
-            className="w-full h-12 text-base bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-2 rounded-xl shadow-sm"
-            onClick={() => setLocation(`/payment/${activeOrder.id}`)}
-          >
-            <Smartphone className="h-5 w-5" />
-            {language === "ar" ? "ادفع الآن" : "Pay Now"}
-          </Button>
+          {/* إذا الطلب pending - انتظر موافقة الكاشير */}
+          {activeOrder.status === "pending" ? (
+            <div className={`w-full p-4 rounded-xl text-center ${d ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-amber-50 border border-amber-200'}`}>
+              <div className="flex items-center justify-center gap-2 mb-2">
+                <div className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+                <span className={`font-medium ${d ? 'text-amber-400' : 'text-amber-700'}`}>
+                  {language === "ar" ? "بانتظار تأكيد الكاشير" : "Waiting for cashier confirmation"}
+                </span>
+              </div>
+              <p className={`text-sm ${d ? 'text-white/50' : 'text-gray-500'}`}>
+                {language === "ar" ? "سيتم تفعيل الدفع بعد مراجعة طلبك" : "Payment will be enabled after your order is reviewed"}
+              </p>
+            </div>
+          ) : (
+            <>
+              <Button
+                className="w-full h-12 text-base bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-2 rounded-xl shadow-sm"
+                onClick={() => setLocation(`/payment/${activeOrder.id}`)}
+              >
+                <Smartphone className="h-5 w-5" />
+                {language === "ar" ? "ادفع الآن" : "Pay Now"}
+              </Button>
 
-          <p className={`text-center text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>
-            {language === "ar" ? "أو ادفع عند الكاشير" : "Or pay at the cashier"}
-          </p>
+              <p className={`text-center text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>
+                {language === "ar" ? "أو ادفع عند الكاشير" : "Or pay at the cashier"}
+              </p>
+            </>
+          )}
         </main>
       </div>
     );

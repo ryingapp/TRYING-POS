@@ -1351,6 +1351,42 @@ export default function POSPage() {
                 </div>
               </div>
 
+              {/* إذا الطلب من QR (pending) - يحتاج تأكيد أولاً */}
+              {settleOrder.status === "pending" && settleOrder.paymentMethod === "pending" && (
+                <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+                    <span className="font-medium text-amber-700 dark:text-amber-400">
+                      {language === "ar" ? "طلب من QR الطاولة - بانتظار التأكيد" : "QR Table Order - Awaiting Confirmation"}
+                    </span>
+                  </div>
+                  <p className="text-sm text-amber-600 dark:text-amber-500">
+                    {language === "ar" 
+                      ? "هذا الطلب أتى من العميل عبر QR Code. اضغط تأكيد لتفعيل الدفع للعميل." 
+                      : "This order came from customer via QR Code. Click confirm to enable payment for customer."}
+                  </p>
+                  <Button
+                    className="w-full gap-2 bg-amber-600 hover:bg-amber-700"
+                    onClick={async () => {
+                      try {
+                        await apiRequest("PUT", `/api/orders/${settleOrder.id}/status`, { status: "confirmed" });
+                        setSettleOrder({ ...settleOrder, status: "confirmed" });
+                        queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).includes("/api/orders") });
+                        toast({
+                          title: language === "ar" ? "تم التأكيد" : "Confirmed",
+                          description: language === "ar" ? "يمكن للعميل الآن الدفع من QR" : "Customer can now pay via QR",
+                        });
+                      } catch {
+                        toast({ title: language === "ar" ? "خطأ" : "Error", variant: "destructive" });
+                      }
+                    }}
+                  >
+                    <CheckCircle className="h-4 w-4" />
+                    {language === "ar" ? "تأكيد الطلب وتفعيل الدفع" : "Confirm Order & Enable Payment"}
+                  </Button>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label>{language === "ar" ? "طريقة الدفع" : "Payment Method"}</Label>
                 <div className="grid grid-cols-4 gap-2">
