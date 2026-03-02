@@ -749,7 +749,7 @@ export async function registerRoutes(
 
   app.post("/api/public/:restaurantId/customer/login", async (req, res) => {
     try {
-      const { restaurantId } = req.params;
+      const { restaurantId: restaurantIdOrSlug } = req.params;
       const { phone: rawPhone, name } = req.body;
 
       if (!rawPhone) {
@@ -764,8 +764,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: phoneValidation.error });
       }
 
-      const restaurant = await storage.getRestaurantById(restaurantId);
-      if (!restaurant) {
+      // Resolve restaurant ID from slug or ID
+      const restaurantId = await storage.resolveRestaurantId(restaurantIdOrSlug);
+      if (!restaurantId) {
         return res.status(404).json({ error: "Restaurant not found" });
       }
 
@@ -1204,19 +1205,26 @@ export async function registerRoutes(
 
   app.get("/api/public/:restaurantId/tables/:tableId/active-order", async (req, res) => {
     try {
-      const { restaurantId, tableId } = req.params;
+      const { restaurantId: restaurantIdOrSlug, tableId } = req.params;
+      
+      // Resolve restaurant ID from slug or ID
+      const resolvedRestaurantId = await storage.resolveRestaurantId(restaurantIdOrSlug);
+      if (!resolvedRestaurantId) {
+        return res.status(404).json({ error: "Restaurant not found" });
+      }
+      
       const table = await storage.getTable(tableId);
-      if (!table || table.restaurantId !== restaurantId) {
+      if (!table || table.restaurantId !== resolvedRestaurantId) {
         return res.status(404).json({ error: "Table not found" });
       }
 
       const order = await storage.getActiveOrderByTable(tableId);
-      if (!order || order.restaurantId !== restaurantId) {
+      if (!order || order.restaurantId !== resolvedRestaurantId) {
         return res.json({ hasActiveOrder: false });
       }
 
       const orderItems = await storage.getOrderItems(order.id);
-      const menuItems = await storage.getMenuItems(restaurantId);
+      const menuItems = await storage.getMenuItems(resolvedRestaurantId);
       const itemsWithDetails = orderItems.map((item: any) => {
         const menuItem = menuItems.find((m: any) => m.id === item.menuItemId);
         return {
