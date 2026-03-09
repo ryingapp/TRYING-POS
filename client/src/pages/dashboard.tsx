@@ -13,22 +13,33 @@ interface StatCardProps {
   icon: React.ElementType;
   description?: string;
   isLoading?: boolean;
+  color?: "green" | "blue" | "orange" | "purple";
 }
 
-function StatCard({ title, value, icon: Icon, description, isLoading }: StatCardProps) {
+const accentMap = {
+  green:  { bg: "bg-green-100 dark:bg-green-900/40",  icon: "text-green-600 dark:text-green-400" },
+  blue:   { bg: "bg-blue-100 dark:bg-blue-900/40",    icon: "text-blue-600 dark:text-blue-400" },
+  orange: { bg: "bg-orange-100 dark:bg-orange-900/40",icon: "text-orange-600 dark:text-orange-400" },
+  purple: { bg: "bg-purple-100 dark:bg-purple-900/40",icon: "text-purple-600 dark:text-purple-400" },
+};
+
+function StatCard({ title, value, icon: Icon, description, isLoading, color = "blue" }: StatCardProps) {
+  const a = accentMap[color];
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
         <CardTitle className="text-sm font-medium text-muted-foreground">
           {title}
         </CardTitle>
-        <Icon className="h-4 w-4 text-muted-foreground" />
+        <div className={`p-2 rounded-lg ${a.bg}`}>
+          <Icon className={`h-4 w-4 ${a.icon}`} />
+        </div>
       </CardHeader>
       <CardContent>
         {isLoading ? (
           <Skeleton className="h-8 w-24" />
         ) : (
-          <div className="text-2xl font-bold">{value}</div>
+          <div className="text-2xl font-bold text-foreground">{value}</div>
         )}
         {description && (
           <p className="text-xs text-muted-foreground mt-1">{description}</p>
@@ -113,11 +124,13 @@ export default function Dashboard() {
           value={`${todaySales.toFixed(2)} ${t("sar")}`}
           icon={DollarSign}
           isLoading={isLoading}
+          color="green"
         />
         <StatCard
           title={t("totalOrders")}
           value={todayOrders.length}
           icon={ShoppingCart}
+          color="blue"
           isLoading={isLoading}
         />
         <StatCard
@@ -125,12 +138,14 @@ export default function Dashboard() {
           value={activeOrders.length}
           icon={Clock}
           isLoading={isLoading}
+          color="orange"
         />
         <StatCard
           title={t("tablesOccupied")}
           value={`${occupiedTables.length}/${tables?.length || 0}`}
           icon={Users}
           isLoading={isLoading}
+          color="purple"
         />
       </div>
 

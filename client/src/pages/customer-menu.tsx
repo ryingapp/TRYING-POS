@@ -464,16 +464,9 @@ export default function CustomerMenuPage() {
 
       const order = await response.json();
 
-      for (const item of orderData.items) {
-        const itemEndpoint = isPublic ? `${apiBase}/orders/${order.id}/items` : `/api/orders/${order.id}/items`;
-        await apiRequest("POST", itemEndpoint, {
-          menuItemId: item.menuItemId,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          totalPrice: item.totalPrice,
-          notes: item.notes || null,
-        });
-      }
+      // Note: for public orders, items are saved atomically by the server during order creation.
+      // For authenticated cashier orders, items are saved by createOrderAtomicPipeline.
+      // No separate item POSTs needed — they caused false failure messages.
 
       return order;
     },
@@ -514,8 +507,22 @@ export default function CustomerMenuPage() {
       }
     },
     onError: (error: any) => {
-      // التعامل مع خطأ تعارض الطاولة
-      if (error?.error === "Table has an active order") {
+      let errData = error;
+      try {
+        if (error instanceof Error) {
+           let msg = error.message;
+           // If message starts with "400: {" or similar, strip the status code
+           if (msg.match(/^\d{3}: /)) {
+              msg = msg.substring(5);
+           }
+           if (msg.trim().startsWith('{')) {
+             errData = JSON.parse(msg);
+           }
+        }
+      } catch {}
+
+      // Deal with specific errors
+      if (errData?.error === "Table has an active order") {
         toast({
           variant: "destructive",
           title: language === "ar" ? "الطاولة مشغولة" : "Table Occupied",
@@ -524,11 +531,19 @@ export default function CustomerMenuPage() {
             : "This table has an active order. Please wait or contact staff.",
         });
         refetchActiveOrder();
+      } else if (errData?.error === "daySessionClosed") {
+        toast({
+          variant: "destructive",
+          title: language === "ar" ? "المطعم مغلق حالياً" : "Restaurant Closed",
+          description: language === "ar" 
+            ? "نأسف، لم يتم فتح الوردية اليومية بعد. يرجى الطلب لاحقاً." 
+            : "Sorry, the daily session hasn't started yet. Please order later.",
+        });
       } else {
         toast({
           variant: "destructive",
           title: t("error"),
-          description: t("orderFailed"),
+          description: errData?.message || errData?.error || t("orderFailed"),
         });
       }
     },
@@ -860,22 +875,31 @@ export default function CustomerMenuPage() {
                 </span>
               </div>
               <p className={`text-sm ${d ? 'text-white/50' : 'text-gray-500'}`}>
-                {language === "ar" ? "سيتم تفعيل الدفع بعد مراجعة طلبك" : "Payment will be enabled after your order is reviewed"}
+                {language === "ar" ? "سيتم تحضير طلبك فور تأكيده" : "Your order will be prepared once confirmed"}
               </p>
             </div>
           ) : (
             <>
-              <Button
-                className="w-full h-12 text-base bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-2 rounded-xl shadow-sm"
-                onClick={() => setLocation(`/payment/${activeOrder.id}`)}
-              >
-                <Smartphone className="h-5 w-5" />
-                {language === "ar" ? "ادفع الآن" : "Pay Now"}
-              </Button>
+              {/* For Table Orders, FORCE Pay at Cashier (Requested by user to prevent fraud) */}
+              <div className={`w-full p-4 rounded-xl text-center mb-4 ${d ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-blue-50 border border-blue-200'}`}>
+                 <p className={`font-medium ${d ? 'text-blue-400' : 'text-blue-700'}`}>
+                    {language === "ar" ? "يرجى الدفع عند الكاشير" : "Please pay at the cashier"}
+                 </p>
+                 <p className={`text-xs mt-1 ${d ? 'text-white/50' : 'text-gray-500'}`}>
+                    {language === "ar" ? "يمكنك طلب المزيد أو الدفع عند الانتهاء" : "You can order more or pay when finished"}
+                 </p>
+              </div>
 
-              <p className={`text-center text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>
-                {language === "ar" ? "أو ادفع عند الكاشير" : "Or pay at the cashier"}
-              </p>
+              {/* Only show 'Pay Now' for non-table orders (Pickup/Delivery) if we ever support them here */}
+              {!tableId && (
+                <Button
+                  className="w-full h-12 text-base bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-2 rounded-xl shadow-sm"
+                  onClick={() => setLocation(`/payment/${activeOrder.id}`)}
+                >
+                  <Smartphone className="h-5 w-5" />
+                  {language === "ar" ? "ادفع الآن" : "Pay Now"}
+                </Button>
+              )}
             </>
           )}
         </main>

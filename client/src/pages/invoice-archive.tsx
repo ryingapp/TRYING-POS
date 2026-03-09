@@ -60,6 +60,25 @@ export default function InvoiceArchivePage() {
   const [showDebitNoteDialog, setShowDebitNoteDialog] = useState(false);
   const [refundReason, setRefundReason] = useState("");
   const [debitReason, setDebitReason] = useState("");
+  const [refundItems, setRefundItems] = useState<any[]>([]);
+
+  // Refund details fetch
+  const { data: invoiceDetails, isLoading: isLoadingDetails } = useQuery<any>({
+    queryKey: ["/api/orders", selectedInvoice?.orderId, "invoice"],
+    enabled: !!selectedInvoice?.orderId && showRefundDialog,
+  });
+
+  // Populate refund items when data loads
+  const [refundItemsPopulated, setRefundItemsPopulated] = useState(false);
+  if (invoiceDetails?.order?.items && !refundItemsPopulated && showRefundDialog) {
+     setRefundItems(invoiceDetails.order.items.map((i: any) => ({ ...i, refundQty: i.quantity, selected: false })));
+     setRefundItemsPopulated(true);
+  }
+  // Reset flag when dialog closes
+  if (!showRefundDialog && refundItemsPopulated) {
+     setRefundItemsPopulated(false);
+     setRefundItems([]);
+  }
 
   const { data: restaurant } = useQuery<Restaurant>({
     queryKey: ["/api/restaurant"],
@@ -110,14 +129,29 @@ export default function InvoiceArchivePage() {
 
   // Refund mutation
   const refundMutation = useMutation({
-    mutationFn: async ({ invoiceId, reason }: { invoiceId: string; reason: string }) => {
-      return apiRequest("POST", `/api/invoices/${invoiceId}/refund`, { reason });
+    mutationFn: async ({ invoiceId, reason, items }: { invoiceId: string; reason: string; items?: any[] }) => {
+       const payloadItems = items?.filter(i => i.selected).map(i => ({
+          id: i.id,
+          menuItemId: i.menuItemId,
+          quantity: Number(i.refundQty)
+       }));
+       if (payloadItems && payloadItems.length === 0) {
+          // If items array was passed but nothing selected, maybe user expects full refund? 
+          // But our UI will enforce selection. If items is undefined, it's full refund.
+       }
+       // If no items are selected in the list but the list is present, we should probably warn or send empty?
+       // The backend treats "undefined" items as Full Refund. 
+       // If we send empty array, backend might return error "No valid items found".
+       const finalItems = (payloadItems && payloadItems.length > 0) ? payloadItems : undefined;
+      return apiRequest("POST", `/api/invoices/${invoiceId}/refund`, { reason, items: finalItems });
     },
     onSuccess: () => {
       toast({ title: isRtl ? "تم الاسترجاع بنجاح" : "Refund processed successfully" });
       queryClient.invalidateQueries({ predicate: (q) => (q.queryKey[0] as string)?.startsWith("/api/invoices") });
       setShowRefundDialog(false);
       setRefundReason("");
+      setRefundItems([]);
+      setRefundItemsPopulated(false);
     },
     onError: (error: any) => {
       toast({ title: isRtl ? "خطأ في الاسترجاع" : "Refund failed", description: error.message, variant: "destructive" });
@@ -626,38 +660,117 @@ export default function InvoiceArchivePage() {
 
       {/* Refund Dialog */}
       <Dialog open={showRefundDialog} onOpenChange={setShowRefundDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{isRtl ? "إصدار استرجاع (إشعار دائن)" : "Issue Refund (Credit Note)"}</DialogTitle>
             <DialogDescription>
               {isRtl 
-                ? `سيتم إنشاء إشعار دائن مرتبط بالفاتورة ${selectedInvoice?.invoiceNumber} وإرجاع الكمية للمخزون`
-                : `A credit note will be created linked to invoice ${selectedInvoice?.invoiceNumber} and inventory will be restored`
+                ? `سيتم إنشاء إشعار دائن مرتبط بالفاتورة ${selectedInvoice?.invoiceNumber}`
+                : `A credit note will be created linked to invoice ${selectedInvoice?.invoiceNumber}`
               }
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <Label>{isRtl ? "المبلغ" : "Amount"}</Label>
-              <Input value={formatCurrency(selectedInvoice?.total ?? 0)} disabled className="bg-muted" />
-            </div>
+          
+          <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+            {refundItems.length > 0 && (
+              <div className="border rounded-md">
+                 <Table>
+                    <TableHeader>
+                       <TableRow>
+                          <TableHead className="w-[50px]">
+                            <input type="checkbox" 
+                               checked={refundItems.length > 0 && refundItems.every(i => i.selected)}
+                               onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setRefundItems(refundItems.map(i => ({ ...i, selected: checked })));
+                               }}
+                               className="accent-primary h-4 w-4"
+                            />
+                          </TableHead>
+                          <TableHead className="text-right">{isRtl ? "المنتج" : "Item"}</TableHead>
+                          <TableHead className="w-[100px] text-center">{isRtl ? "الكمية" : "Qty"}</TableHead>
+                          <TableHead className="text-right">{isRtl ? "السعر" : "Price"}</TableHead>
+                       </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                       {refundItems.map((item, idx) => (
+                          <TableRow key={idx}>
+                             <TableCell>
+                                <input type="checkbox" 
+                                   checked={item.selected}
+                                   onChange={(e) => {
+                                      const newItems = [...refundItems];
+                                      newItems[idx].selected = e.target.checked;
+                                      setRefundItems(newItems);
+                                   }}
+                                   className="accent-primary h-4 w-4"
+                                />
+                             </TableCell>
+                             <TableCell>{isRtl ? item.itemName || "منتج" : item.itemName || "Item"}</TableCell>
+                             <TableCell>
+                                <div className="flex items-center gap-2 justify-center">
+                                   <Button variant="outline" size="icon" className="h-6 w-6" 
+                                      onClick={() => {
+                                         const newItems = [...refundItems];
+                                         if (newItems[idx].refundQty > 1) newItems[idx].refundQty--;
+                                         setRefundItems(newItems);
+                                      }}
+                                      disabled={!item.selected}
+                                   >-</Button>
+                                   <span className="w-8 text-center">{item.refundQty}</span>
+                                   <Button variant="outline" size="icon" className="h-6 w-6"
+                                      onClick={() => {
+                                         const newItems = [...refundItems];
+                                         if (newItems[idx].refundQty < item.quantity) newItems[idx].refundQty++;
+                                         setRefundItems(newItems);
+                                      }}
+                                      disabled={!item.selected}
+                                   >+</Button>
+                                </div>
+                             </TableCell>
+                             <TableCell>{formatCurrency(Number(item.unitPrice) * item.refundQty)}</TableCell>
+                          </TableRow>
+                       ))}
+                    </TableBody>
+                 </Table>
+              </div>
+            )}
+
             <div>
               <Label>{isRtl ? "سبب الاسترجاع *" : "Refund Reason *"}</Label>
               <Textarea
                 value={refundReason}
                 onChange={(e) => setRefundReason(e.target.value)}
                 placeholder={isRtl ? "اكتب سبب الاسترجاع..." : "Enter refund reason..."}
-                rows={3}
+                rows={2}
               />
             </div>
+            
+            <div className="text-sm text-muted-foreground p-2 bg-muted rounded">
+               {refundItems.some(i => i.selected) 
+                  ? (isRtl ? `سيتم استرجاع ${refundItems.filter(i => i.selected).length} عناصر` : `Refunding ${refundItems.filter(i => i.selected).length} items`)
+                  : (isRtl ? "استرجاع كامل الفاتورة" : "Full Refund (All items)")
+               }
+            </div>
           </div>
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowRefundDialog(false)}>
               {isRtl ? "إلغاء" : "Cancel"}
             </Button>
             <Button
               variant="destructive"
-              onClick={() => selectedInvoice && refundMutation.mutate({ invoiceId: selectedInvoice.id, reason: refundReason })}
+              onClick={() => {
+                 if (selectedInvoice) {
+                    const hasSelection = refundItems.some(i => i.selected);
+                    // If selection exists, pass items. Else pass undefined for full refund.
+                    refundMutation.mutate({ 
+                       invoiceId: selectedInvoice.id, 
+                       reason: refundReason, 
+                       items: hasSelection ? refundItems : undefined 
+                    });
+                 }
+              }}
               disabled={!refundReason.trim() || refundMutation.isPending}
             >
               {refundMutation.isPending ? (isRtl ? "جاري المعالجة..." : "Processing...") : (isRtl ? "تأكيد الاسترجاع" : "Confirm Refund")}

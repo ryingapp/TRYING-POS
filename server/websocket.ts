@@ -176,12 +176,22 @@ export class WebSocketManager {
     );
   }
 
-  // Send notification about new order
+  // Send notification about new order.
+  // If branchId is absent (null / empty string), broadcast to the whole restaurant
+  // so cashiers who are assigned to a branch still receive table orders that have
+  // no explicit branch.
   notifyNewOrder(restaurantId: string, branchId: string, order: any) {
-    this.broadcastToBranch(restaurantId, branchId, {
-      type: "new_order",
-      payload: order,
-    });
+    if (!branchId) {
+      this.broadcastToRestaurant(restaurantId, {
+        type: "new_order",
+        payload: order,
+      });
+    } else {
+      this.broadcastToBranch(restaurantId, branchId, {
+        type: "new_order",
+        payload: order,
+      });
+    }
   }
 
   // Send notification about order status change
@@ -192,10 +202,17 @@ export class WebSocketManager {
     status: string,
     order?: any,
   ) {
-    this.broadcastToBranch(restaurantId, branchId, {
-      type: "order_status_changed",
-      payload: { orderId, status, order },
-    });
+    if (!branchId) {
+      this.broadcastToRestaurant(restaurantId, {
+        type: "order_status_changed",
+        payload: { orderId, status, order },
+      });
+    } else {
+      this.broadcastToBranch(restaurantId, branchId, {
+        type: "order_status_changed",
+        payload: { orderId, status, order },
+      });
+    }
   }
 
   // Send notification about order update

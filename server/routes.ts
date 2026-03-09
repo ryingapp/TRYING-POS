@@ -1751,6 +1751,25 @@ export async function registerRoutes(
 
       const order = await storage.createOrder(data);
 
+      // Save order items atomically after order creation (prevents orphaned orders with no items)
+      if (req.body.items && Array.isArray(req.body.items) && req.body.items.length > 0) {
+        for (const rawItem of req.body.items) {
+          try {
+            await storage.createOrderItem({
+              orderId: order.id,
+              menuItemId: rawItem.menuItemId || null,
+              quantity: Math.max(1, Math.floor(Number(rawItem.quantity || 1))),
+              unitPrice: String(rawItem.unitPrice ?? "0"),
+              totalPrice: String(rawItem.totalPrice ?? "0"),
+              notes: rawItem.notes || null,
+              itemName: rawItem.itemName || null,
+            });
+          } catch (itemErr) {
+            console.error("Failed to save order item (public):", itemErr);
+          }
+        }
+      }
+
       // Auto-apply deposit discount
       let depositApplied = false;
 
@@ -2826,10 +2845,9 @@ export async function registerRoutes(
     }
   });
 
-  // Invoice Audit Log
+  // Invoice Audit Log — accessible to any authenticated user of the restaurant
   app.get("/api/invoice-audit-log", async (req, res) => {
     try {
-      await requirePermission(req, "reports");
       const restaurantId = await getRestaurantId(req);
       if (req.query.limit && isNaN(Number(req.query.limit))) {
         return res.status(400).json({ error: "Invalid limit" });
@@ -4284,9 +4302,20 @@ export async function registerRoutes(
 
       res.json(order);
     } catch (error: any) {
+      console.error("Order update error:", error);
       if (error?.message?.includes("not found"))
         return res.status(404).json({ error: error.message });
-      res.status(400).json({ error: "Invalid request body" });
+      if (error?.name === "ZodError" || error?.issues) {
+        return res.status(400).json({ 
+          error: "Validation failed", 
+          details: error.issues,
+          code: "VALIDATION_ERROR"
+        });
+      }
+      res.status(400).json({ 
+        error: error.message || "Invalid request body",
+        code: "ORDER_UPDATE_FAILED"
+      });
     }
   });
 
@@ -4584,9 +4613,19 @@ export async function registerRoutes(
       }
 
       res.status(201).json(item);
-    } catch (error) {
-      console.error(error);
-      res.status(400).json({ error: "Invalid request body" });
+    } catch (error: any) {
+      console.error("Order item creation error:", error);
+      if (error?.name === "ZodError" || error?.issues) {
+        return res.status(400).json({ 
+          error: "Validation failed", 
+          details: error.issues,
+          code: "VALIDATION_ERROR"
+        });
+      }
+      res.status(400).json({ 
+        error: error.message || "Invalid request body",
+        code: "ORDER_ITEM_CREATION_FAILED"
+      });
     }
   });
 

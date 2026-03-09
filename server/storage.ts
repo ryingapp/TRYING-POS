@@ -587,11 +587,11 @@ export class DatabaseStorage implements IStorage {
   // Orders
   async getOrders(restaurantId: string, branchId?: string): Promise<Order[]> {
     if (branchId) {
-      // Include orders for this specific branch AND orders with no branch (from general QR)
+      // Only return orders that belong specifically to this branch
       return db.select().from(orders)
         .where(and(
           eq(orders.restaurantId, restaurantId),
-          or(eq(orders.branchId, branchId), isNull(orders.branchId))
+          eq(orders.branchId, branchId)
         ))
         .orderBy(desc(orders.createdAt));
     }
@@ -1895,11 +1895,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getCurrentDaySession(restaurantId: string, branchId?: string): Promise<DaySession | undefined> {
-    const today = new Date().toISOString().split('T')[0];
+    // const today = new Date().toISOString().split('T')[0];
     
+    // Find the currently OPEN session. 
+    // We do NOT filter by date=today because a shift might run past midnight (e.g. opened yesterday).
     const conditions = [
       eq(daySessions.restaurantId, restaurantId),
-      eq(daySessions.date, today),
+      // eq(daySessions.date, today), // Removed to allow sessions spanning multiple days
       eq(daySessions.status, "open"),
     ];
     
