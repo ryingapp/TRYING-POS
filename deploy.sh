@@ -72,6 +72,10 @@ EOF
 # Load environment variables for migration scripts
 export DATABASE_URL=$DB_URL
 
+# Run database migrations
+echo "[6.25/8] Running database migrations..."
+npx drizzle-kit push || echo "  ⚠️ Database migration failed"
+
 # Run schema migration fixes if present
 if [ -f $APP_DIR/add-cashier-name.cjs ]; then
     echo "[6.5/8] Running schema fixes (cashier_name)..."
