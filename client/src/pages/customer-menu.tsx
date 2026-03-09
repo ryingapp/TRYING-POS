@@ -172,6 +172,7 @@ export default function CustomerMenuPage() {
   const [couponDiscount, setCouponDiscount] = useState(0);
   const [couponError, setCouponError] = useState("");
   const [couponApplied, setCouponApplied] = useState<string | null>(null);
+  const [depositReservationId, setDepositReservationId] = useState<string | null>(null);
   const [validatingCoupon, setValidatingCoupon] = useState(false);
   const [showItemDetail, setShowItemDetail] = useState<MenuItem | null>(null);
   const [detailVariant, setDetailVariant] = useState<SelectedVariant | null>(null);
@@ -277,12 +278,12 @@ export default function CustomerMenuPage() {
   const taxRate = isTaxEnabled ? 15 : 0;
 
   const getItemPrice = (cartItem: CartItem): number => {
-    let price = parseFloat(cartItem.menuItem.price);
+    let price = parseFloat(cartItem.menuItem.price || "0");
     if (cartItem.selectedVariant) {
-      price += cartItem.selectedVariant.priceAdjustment;
+      price += Number(cartItem.selectedVariant.priceAdjustment || 0);
     }
     if (cartItem.selectedCustomizations?.length) {
-      price += cartItem.selectedCustomizations.reduce((s, c) => s + c.priceAdjustment, 0);
+      price += cartItem.selectedCustomizations.reduce((s, c) => s + Number(c.priceAdjustment || 0), 0);
     }
     return price;
   };
@@ -307,10 +308,17 @@ export default function CustomerMenuPage() {
         setCouponDiscount(data.discount);
         setCouponApplied(couponCode.trim());
         setCouponError("");
+        // Store reservation ID if this is a reservation deposit code
+        if (data.isReservationDeposit && data.reservationId) {
+          setDepositReservationId(data.reservationId);
+        } else {
+          setDepositReservationId(null);
+        }
       } else {
         setCouponError(data.error || (language === "ar" ? "كود غير صالح" : "Invalid code"));
         setCouponDiscount(0);
         setCouponApplied(null);
+        setDepositReservationId(null);
       }
     } catch {
       setCouponError(language === "ar" ? "فشل التحقق" : "Validation failed");
@@ -323,6 +331,7 @@ export default function CustomerMenuPage() {
     setCouponDiscount(0);
     setCouponApplied(null);
     setCouponError("");
+    setDepositReservationId(null);
   };
 
   const placeOrderMutation = useMutation({
@@ -364,6 +373,65 @@ export default function CustomerMenuPage() {
       const cartTax = cartDiscountedSubtotal * (taxRate / 100);
       const cartTotal = cartDiscountedSubtotal + cartTax;
 
+      // For EdfaPay online payment: DON'T create order yet — send data to create-session
+      // Order will be created only after payment is confirmed
+      if (orderData.paymentMethod === "edfapay_online") {
+        const baseUrl = window.location.origin;
+        const sessionId = crypto.randomUUID ? crypto.randomUUID() : `sess_${Date.now()}`;
+        const callbackUrl = `${baseUrl}/payment-callback/${sessionId}`;
+
+        const sessionRes = await fetch("/api/payments/create-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderData: {
+              restaurantId,
+              branchId: branchId || null,
+              orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
+              orderType: orderData.orderType,
+              tableId: orderData.tableId,
+              customerId: customerId || loggedInCustomer?.id || null,
+              customerName: orderData.customerName || null,
+              customerPhone: orderData.customerPhone || null,
+              customerAddress: orderData.customerAddress || null,
+              kitchenNotes: orderData.kitchenNotes || null,
+              subtotal: cartSubtotal.toFixed(2),
+              discount: couponDiscount.toFixed(2),
+              tax: cartTax.toFixed(2),
+              total: cartTotal.toFixed(2),
+            },
+            items: orderData.items.map(item => ({
+              menuItemId: item.menuItemId,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              totalPrice: item.totalPrice,
+              notes: item.notes || null,
+            })),
+            callbackUrl,
+          }),
+        });
+
+        if (!sessionRes.ok) {
+          const errData = await sessionRes.json().catch(() => ({}));
+          throw new Error(errData.error || "Failed to create payment session");
+        }
+
+        const session = await sessionRes.json();
+
+        if (session.action === "redirect" && session.redirectUrl) {
+          // Return a special marker so onSuccess knows to redirect to EdfaPay
+          return { _edfapayRedirect: true, redirectUrl: session.redirectUrl, sessionId: session.sessionId };
+        } else if (session.action === "success") {
+          // Rare: direct success without redirect
+          return { id: session.orderId, _edfapayDirect: true };
+        } else {
+          throw new Error(language === "ar"
+            ? "فشل في إنشاء جلسة الدفع"
+            : "Failed to create payment session");
+        }
+      }
+
+      // For cash / other payment methods: create order normally
       const orderEndpoint = isPublic ? `${apiBase}/orders` : "/api/orders";
       const response = await apiRequest("POST", orderEndpoint, {
         restaurantId,
@@ -381,8 +449,17 @@ export default function CustomerMenuPage() {
         discount: couponDiscount.toFixed(2),
         tax: cartTax.toFixed(2),
         total: cartTotal.toFixed(2),
-        status: orderData.paymentMethod === "tap_to_pay" ? "payment_pending" : "pending",
+        status: "pending",
         isPaid: false,
+        depositReservationId: depositReservationId || undefined,
+        // Include items for invoice generation (server needs them before separate item API calls)
+        items: orderData.items.map(item => ({
+          menuItemId: item.menuItemId,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          totalPrice: item.totalPrice,
+          notes: item.notes || null,
+        })),
       });
 
       const order = await response.json();
@@ -401,6 +478,13 @@ export default function CustomerMenuPage() {
       return order;
     },
     onSuccess: (order) => {
+      // Handle EdfaPay redirect (no order created yet)
+      if (order._edfapayRedirect) {
+        setCart([]);
+        window.location.href = order.redirectUrl;
+        return;
+      }
+
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/orders") });
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/kitchen") });
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).includes("/active-order") });
@@ -417,12 +501,10 @@ export default function CustomerMenuPage() {
         toast({
           title: language === "ar" ? "تم إرسال طلبك للمطبخ!" : "Order sent to kitchen!",
           description: orderHasDeposit
-            ? (language === "ar" ? `تم خصم ${depositAmt} ريال (رسوم الحجز) من فاتورتك` : `${depositAmt} SAR booking fee deducted from your bill`)
+            ? (language === "ar" ? `تم خصم ${depositAmt} ر.س (رسوم الحجز) من فاتورتك` : `${depositAmt} SAR booking fee deducted from your bill`)
             : (language === "ar" ? "بتقدر تدفع بعد ما تخلص أكلك" : "You can pay after you finish your meal"),
         });
         refetchActiveOrder();
-      } else if (paymentMethod === "tap_to_pay") {
-        setLocation(`/payment/${order.id}`);
       } else {
         toast({
           title: t("orderPlaced"),
@@ -750,11 +832,11 @@ export default function CustomerMenuPage() {
                         {getLocalizedName(item.menuItem?.nameEn, item.menuItem?.nameAr) || (language === "ar" ? "عنصر" : "Item")}
                       </p>
                       <p className={`text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>
-                        x{item.quantity} • {parseFloat(item.unitPrice || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                        x{item.quantity} • {parseFloat(item.unitPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                       </p>
                     </div>
                     <span className={`font-medium text-sm ${d ? 'text-white' : 'text-gray-900'}`}>
-                      {parseFloat(item.totalPrice || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                      {parseFloat(item.totalPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                     </span>
                   </div>
                 ))}
@@ -763,7 +845,7 @@ export default function CustomerMenuPage() {
               <div className={`mt-4 pt-4 border-t ${d ? 'border-white/10' : 'border-gray-200'} flex items-center justify-between`}>
                 <span className={`text-lg font-bold ${d ? 'text-white' : 'text-gray-900'}`}>{language === "ar" ? "المجموع" : "Total"}</span>
                 <span className="text-lg font-bold text-[#8B1A1A]">
-                  {orderTotal.toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                  {orderTotal.toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                 </span>
               </div>
           </div>
@@ -1024,7 +1106,7 @@ export default function CustomerMenuPage() {
                 <div>
                   <p className={`font-semibold text-sm ${d ? 'text-emerald-300' : 'text-emerald-700'}`}>
                     {language === "ar" 
-                      ? `رسوم حجز مدفوعة: ${depositInfo.depositAmount} ريال`
+                      ? `رسوم حجز مدفوعة: ${depositInfo.depositAmount} ر.س`
                       : `Paid booking fee: ${depositInfo.depositAmount} SAR`}
                   </p>
                   <p className={`text-xs mt-0.5 ${d ? 'text-emerald-400/60' : 'text-emerald-600/70'}`}>

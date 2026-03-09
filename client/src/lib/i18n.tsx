@@ -97,7 +97,7 @@ const translations: Translations = {
   calories: { en: "Calories", ar: "السعرات الحرارية" },
   prepTime: { en: "Prep Time", ar: "وقت التحضير" },
   minutes: { en: "minutes", ar: "دقائق" },
-  sar: { en: "SAR", ar: "ريال" },
+  sar: { en: "SAR", ar: "ر.س" },
   sarSymbol: { en: "﷼", ar: "﷼" },
   riyal: { en: "﷼", ar: "﷼" },
   language: { en: "Language", ar: "اللغة" },

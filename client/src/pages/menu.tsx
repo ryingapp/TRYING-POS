@@ -259,7 +259,7 @@ function MenuItemForm({
 
   // Variant inline form state
   const [showVariantForm, setShowVariantForm] = useState(false);
-  const [variantForm, setVariantForm] = useState({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
+  const [variantForm, setVariantForm] = useState({ nameEn: "", nameAr: "", priceAdjustment: "0", isDefault: false, isAvailable: true });
 
   // Recipe state
   const [recipeIngredient, setRecipeIngredient] = useState({ inventoryItemId: "", quantity: "", unit: "" });
@@ -381,7 +381,7 @@ function MenuItemForm({
       const response = await fetch(`/api/menu-items/${savedItemId}/variants`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...data, menuItemId: savedItemId, priceModifier: parseFloat(data.priceModifier) }),
+        body: JSON.stringify({ ...data, menuItemId: savedItemId, priceAdjustment: data.priceAdjustment || "0" }),
       });
       if (!response.ok) throw new Error("Failed");
       return response.json();
@@ -389,7 +389,7 @@ function MenuItemForm({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/menu-items", savedItemId, "variants"] });
       setShowVariantForm(false);
-      setVariantForm({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
+      setVariantForm({ nameEn: "", nameAr: "", priceAdjustment: "0", isDefault: false, isAvailable: true });
       toast({ title: language === "ar" ? "تم إضافة المتغير" : "Variant added" });
     },
   });
@@ -740,8 +740,8 @@ function MenuItemForm({
                         <Input
                           type="number"
                           step="0.01"
-                          value={variantForm.priceModifier}
-                          onChange={(e) => setVariantForm({ ...variantForm, priceModifier: e.target.value })}
+                          value={variantForm.priceAdjustment}
+                          onChange={(e) => setVariantForm({ ...variantForm, priceAdjustment: e.target.value })}
                           placeholder="+5.00 or -3.00"
                         />
                       </div>
@@ -795,7 +795,7 @@ function MenuItemForm({
               ) : (
                 <div className="space-y-2">
                   {variants.map((v: any) => {
-                    const mod = parseFloat(v.priceModifier || "0");
+                    const mod = parseFloat(v.priceAdjustment || "0");
                     const finalPrice = basePrice + mod;
                     return (
                       <div key={v.id} className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/30 transition-colors">
@@ -1676,7 +1676,7 @@ function CustomizationsSection({ language }: { language: string }) {
   const [variantFormData, setVariantFormData] = useState({
     nameEn: "",
     nameAr: "",
-    priceModifier: "0",
+    priceAdjustment: "0",
     isDefault: false,
     isAvailable: true,
   });
@@ -1693,7 +1693,7 @@ function CustomizationsSection({ language }: { language: string }) {
   const [optionFormData, setOptionFormData] = useState({
     nameEn: "",
     nameAr: "",
-    priceModifier: "0",
+    priceAdjustment: "0",
     isDefault: false,
     isAvailable: true,
   });
@@ -1739,7 +1739,7 @@ function CustomizationsSection({ language }: { language: string }) {
         body: JSON.stringify({
           ...data,
           menuItemId: selectedMenuItem,
-          priceModifier: parseFloat(data.priceModifier),
+          priceAdjustment: parseFloat(data.priceAdjustment),
         }),
       });
       if (!response.ok) throw new Error("Failed to create variant");
@@ -1748,7 +1748,7 @@ function CustomizationsSection({ language }: { language: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/menu-items", selectedMenuItem, "variants"] });
       setIsVariantDialogOpen(false);
-      setVariantFormData({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
+      setVariantFormData({ nameEn: "", nameAr: "", priceAdjustment: "0", isDefault: false, isAvailable: true });
       toast({ title: language === "ar" ? "تم الحفظ" : "Saved" });
     },
   });
@@ -1786,7 +1786,7 @@ function CustomizationsSection({ language }: { language: string }) {
         body: JSON.stringify({
           ...data,
           groupId: selectedGroup?.id,
-          priceModifier: parseFloat(data.priceModifier),
+          priceAdjustment: parseFloat(data.priceAdjustment),
         }),
       });
       if (!response.ok) throw new Error("Failed to create option");
@@ -1795,7 +1795,7 @@ function CustomizationsSection({ language }: { language: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/customization-groups", selectedGroup?.id, "options"] });
       setIsOptionDialogOpen(false);
-      setOptionFormData({ nameEn: "", nameAr: "", priceModifier: "0", isDefault: false, isAvailable: true });
+      setOptionFormData({ nameEn: "", nameAr: "", priceAdjustment: "0", isDefault: false, isAvailable: true });
       toast({ title: language === "ar" ? "تم الحفظ" : "Saved" });
     },
   });
@@ -1913,8 +1913,8 @@ function CustomizationsSection({ language }: { language: string }) {
                         <Input
                           type="number"
                           step="0.01"
-                          value={variantFormData.priceModifier}
-                          onChange={(e) => setVariantFormData({ ...variantFormData, priceModifier: e.target.value })}
+                          value={variantFormData.priceAdjustment}
+                          onChange={(e) => setVariantFormData({ ...variantFormData, priceAdjustment: e.target.value })}
                         />
                         <p className="text-xs text-muted-foreground">
                           {language === "ar" ? "استخدم قيمة سالبة للخصم" : "Use negative value for discount"}
@@ -1962,7 +1962,7 @@ function CustomizationsSection({ language }: { language: string }) {
                           {language === "ar" ? variant.nameAr : variant.nameEn}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          {parseFloat(variant.priceModifier) >= 0 ? "+" : ""}{variant.priceModifier} {language === "ar" ? "ريال" : "SAR"}
+                          {parseFloat(variant.priceAdjustment) >= 0 ? "+" : ""}{variant.priceAdjustment} {language === "ar" ? "ريال" : "SAR"}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -2156,8 +2156,8 @@ function CustomizationsSection({ language }: { language: string }) {
                                   <Input
                                     type="number"
                                     step="0.01"
-                                    value={optionFormData.priceModifier}
-                                    onChange={(e) => setOptionFormData({ ...optionFormData, priceModifier: e.target.value })}
+                                    value={optionFormData.priceAdjustment}
+                                    onChange={(e) => setOptionFormData({ ...optionFormData, priceAdjustment: e.target.value })}
                                   />
                                 </div>
                                 <Button type="submit" className="w-full" disabled={createOptionMutation.isPending}>
@@ -2185,7 +2185,7 @@ function CustomizationsSection({ language }: { language: string }) {
                               <span>{language === "ar" ? option.nameAr : option.nameEn}</span>
                               <div className="flex items-center gap-2">
                                 <span className="text-sm">
-                                  +{option.priceModifier} {language === "ar" ? "ريال" : "SAR"}
+                                  +{option.priceAdjustment} {language === "ar" ? "ريال" : "SAR"}
                                 </span>
                                 <Button
                                   size="sm"

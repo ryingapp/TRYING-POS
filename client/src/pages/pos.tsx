@@ -55,6 +55,8 @@ export default function POSPage() {
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [splitCashAmount, setSplitCashAmount] = useState(0);
   const [splitCardAmount, setSplitCardAmount] = useState(0);
+  const [showSplitItemsCalculator, setShowSplitItemsCalculator] = useState(false);
+  const [selectedSplitItems, setSelectedSplitItems] = useState<Record<string, number>>({}); // itemId -> quantity
   const [cashReceived, setCashReceived] = useState(0);
   const [showCheckout, setShowCheckout] = useState(false);
   const [showInvoice, setShowInvoice] = useState(false);
@@ -115,7 +117,7 @@ export default function POSPage() {
               toast({
                 title: direction === "rtl" ? "تم العثور على رسوم حجز" : "Booking fee found",
                 description: direction === "rtl" 
-                  ? `سيتم خصم ${depositAmt} ريال من قيمة الطلب`
+                  ? `سيتم خصم ${depositAmt} ر.س من قيمة الطلب`
                   : `${depositAmt} SAR will be deducted from the order`,
               });
             }
@@ -162,7 +164,7 @@ export default function POSPage() {
 
   const formatCurrency = (amount: string | number | null | undefined) => {
     const num = parseFloat(String(amount || 0));
-    return `${num.toFixed(2)} ${language === "ar" ? "ريال" : "SAR"}`;
+    return `${num.toFixed(2)} ${language === "ar" ? "ر.س" : "SAR"}`;
   };
 
   const openSessionMutation = useMutation({
@@ -307,12 +309,11 @@ export default function POSPage() {
     if (!allOrders || !tables) return [];
     return allOrders.filter(o => 
       o.status === "pending" && 
-      o.paymentMethod === "pending" && 
       o.orderType === "dine_in" &&
       o.tableId
     ).map(o => {
       const table = tables.find(t => t.id === o.tableId);
-      return { ...o, tableName: table?.name || table?.tableNumber || "طاولة" };
+      return { ...o, tableName: (table as any)?.name || table?.tableNumber || "طاولة" };
     });
   }, [allOrders, tables]);
 
@@ -372,7 +373,7 @@ export default function POSPage() {
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/invoices") });
       toast({
         title: language === "ar" ? "تم تحصيل الحساب" : "Table Settled",
-        description: language === "ar" ? `تم الدفع: ${settleTotal.toFixed(2)} ريال` : `Paid: ${settleTotal.toFixed(2)} SAR`,
+        description: language === "ar" ? `تم الدفع: ${settleTotal.toFixed(2)} ر.س` : `Paid: ${settleTotal.toFixed(2)} SAR`,
       });
       setSettleDialogOpen(false);
       setSettleOrder(null);
@@ -492,7 +493,9 @@ export default function POSPage() {
         total: total.toFixed(2),
         paymentMethod: isDineInWithTable ? "pending" : paymentMethod,
         isPaid: isDineInWithTable ? false : true,
-        status: "pending",
+        // If cashier creates the order for a table, auto-confirm it so it shows in kitchen
+        // If it's a customer QR order (from another app), it will be 'pending'
+        status: isDineInWithTable ? "confirmed" : "pending",
         notes: isDineInWithTable 
           ? (notes || null)
           : (paymentMethod === "split" 
@@ -774,8 +777,31 @@ export default function POSPage() {
                       {order.tableName}
                     </Badge>
                   </div>
+                  <div className="max-h-24 overflow-y-auto space-y-1 my-2 bg-muted/30 p-1.5 rounded text-xs">
+                    {(order as any).items?.map((item: any, idx: number) => (
+                      <div key={idx} className="border-b border-border/50 last:border-0 pb-1 last:pb-0">
+                        <div className="flex justify-between">
+                          <span>{item.quantity}x {language === "ar" ? (item.menuItem?.nameAr || item.itemName) : (item.menuItem?.nameEn || item.itemName)}</span>
+                          <span>{parseFloat(item.totalPrice).toFixed(0)}</span>
+                        </div>
+                        {/* Variants */}
+                        {item.selectedVariant && (
+                          <div className="text-[10px] text-primary ps-2">
+                             {language === "ar" ? item.selectedVariant.nameAr : item.selectedVariant.nameEn}
+                          </div>
+                        )}
+                        {/* Customizations */}
+                        {item.selectedCustomizations && item.selectedCustomizations.length > 0 && (
+                          <div className="text-[10px] text-muted-foreground ps-2">
+                             {item.selectedCustomizations.map((c: any) => language === "ar" ? c.nameAr : c.nameEn).join(", ")}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
                   <p className="text-sm font-bold">
-                    {parseFloat(order.total || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                    {parseFloat(order.total || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                   </p>
                   {order.customerName && (
                     <p className="text-xs text-muted-foreground truncate">{order.customerName}</p>
@@ -1074,7 +1100,7 @@ export default function POSPage() {
                   </p>
                   <p className="text-xs text-green-600 dark:text-green-400 mt-1">
                     {language === "ar" 
-                      ? `سيتم خصم ${depositInfo.depositAmount} ريال من قيمة الطلب (${depositInfo.customerName})`
+                      ? `سيتم خصم ${depositInfo.depositAmount} ر.س من قيمة الطلب (${depositInfo.customerName})`
                       : `${depositInfo.depositAmount} SAR will be deducted from the order (${depositInfo.customerName})`}
                   </p>
                 </div>
@@ -1168,6 +1194,50 @@ export default function POSPage() {
 
               {paymentMethod === "split" && (
                 <div className="space-y-3 p-3 bg-muted/50 rounded-lg">
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    className="w-full text-xs h-8 mb-1"
+                    onClick={() => {
+                        setShowSplitItemsCalculator(!showSplitItemsCalculator);
+                        setSelectedSplitItems({});
+                    }}
+                  >
+                    {showSplitItemsCalculator ? (language === "ar" ? "إخفاء الأصناف" : "Hide Items Calculator") : (language === "ar" ? "حاسبة الأصناف" : "Split by Items Calculator")}
+                  </Button>
+                  
+                  {showSplitItemsCalculator && (
+                    <div className="bg-background rounded-md border p-2 mb-2 max-h-48 overflow-y-auto space-y-2">
+                       {(cart || []).map((item, idx) => (
+                          <div key={idx} className="flex items-center justify-between text-xs py-1 border-b last:border-0">
+                            <div className="flex items-center gap-2">
+                               <input 
+                                  type="checkbox" 
+                                  className="rounded border-gray-300"
+                                  checked={!!selectedSplitItems[idx]}
+                                  onChange={(e) => {
+                                     const newSelected = {...selectedSplitItems};
+                                     if(e.target.checked) newSelected[idx] = item.quantity;
+                                     else delete newSelected[idx];
+                                     setSelectedSplitItems(newSelected);
+                                     
+                                     const totalSelected = Object.keys(newSelected).reduce((sum, key) => {
+                                        const i = (cart || [])[parseInt(key)];
+                                        return sum + (parseFloat(i.menuItem.price) * i.quantity);
+                                     }, 0);
+                                     
+                                     setSplitCardAmount(parseFloat(totalSelected.toFixed(2)));
+                                     setSplitCashAmount(parseFloat((total - totalSelected).toFixed(2)));
+                                  }}
+                               />
+                               <span>{getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr)} x{item.quantity}</span>
+                            </div>
+                            <span>{(parseFloat(item.menuItem.price) * item.quantity).toFixed(2)}</span>
+                          </div>
+                       ))}
+                    </div>
+                  )}
+
                   {/* Quick split buttons */}
                   <div className="flex gap-2">
                     <Button
@@ -1389,11 +1459,36 @@ export default function POSPage() {
               </div>
 
               {settleOrder.items && settleOrder.items.length > 0 && (
-                <div className="space-y-1 max-h-40 overflow-auto">
+                <div className="space-y-2 max-h-60 overflow-auto pe-2">
                   {settleOrder.items.map((item: any, idx: number) => (
-                    <div key={idx} className="flex justify-between text-sm py-1 border-b last:border-0">
-                      <span>{item.quantity}x {language === "ar" ? (item.nameAr || item.nameEn) : (item.nameEn || item.nameAr)}</span>
-                      <span>{parseFloat(item.totalPrice || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}</span>
+                    <div key={idx} className="text-sm py-1 border-b last:border-0 border-border/50">
+                      <div className="flex justify-between">
+                         <span className="font-medium">{item.quantity}x {language === "ar" ? (item.nameAr || item.nameEn) : (item.nameEn || item.nameAr)}</span>
+                         <span>{parseFloat(item.totalPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}</span>
+                      </div>
+                      
+                      {/* Variants */}
+                      {item.selectedVariant && (
+                        <div className="text-xs text-primary ps-4">
+                          {language === "ar" ? `الحجم: ${item.selectedVariant.nameAr || ''}` : `Size: ${item.selectedVariant.nameEn || ''}`}
+                        </div>
+                      )}
+
+                      {/* Customizations */}
+                      {item.selectedCustomizations && item.selectedCustomizations.length > 0 && (
+                        <div className="text-xs text-muted-foreground ps-4 mt-0.5">
+                          {item.selectedCustomizations.map((c: any) => 
+                            language === "ar" ? c.nameAr : c.nameEn
+                          ).join(" + ")}
+                        </div>
+                      )}
+
+                      {/* Notes */}
+                      {item.notes && (
+                        <div className="text-xs text-amber-600 dark:text-amber-400 ps-4 italic mt-0.5">
+                          {language === "ar" ? `ملاحظة: ${item.notes}` : `Note: ${item.notes}`}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1416,7 +1511,7 @@ export default function POSPage() {
                 </div>
                 <div className="flex justify-between font-bold text-lg pt-2 border-t">
                   <span>{language === "ar" ? "الإجمالي" : "Total"}</span>
-                  <span className="text-orange-600 dark:text-orange-400">{parseFloat(settleOrder.total || "0").toFixed(2)} {language === "ar" ? "ريال" : "SAR"}</span>
+                  <span className="text-orange-600 dark:text-orange-400">{parseFloat(settleOrder.total || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}</span>
                 </div>
               </div>
 
@@ -1481,6 +1576,51 @@ export default function POSPage() {
 
               {settlePaymentMethod === "split" && (
                 <div className="space-y-3 p-3 bg-muted/50 rounded-lg">
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    className="w-full text-xs h-8 mb-1"
+                    onClick={() => {
+                        setShowSplitItemsCalculator(!showSplitItemsCalculator);
+                        setSelectedSplitItems({});
+                    }}
+                  >
+                    {showSplitItemsCalculator ? (language === "ar" ? "إخفاء الأصناف" : "Hide Items Calculator") : (language === "ar" ? "حاسبة الأصناف" : "Split by Items Calculator")}
+                  </Button>
+                  
+                  {showSplitItemsCalculator && (
+                    <div className="bg-background rounded-md border p-2 mb-2 max-h-48 overflow-y-auto space-y-2">
+                       {(settleOrder?.items || []).map((item, idx) => (
+                          <div key={idx} className="flex items-center justify-between text-xs py-1 border-b last:border-0">
+                            <div className="flex items-center gap-2">
+                               <input 
+                                  type="checkbox" 
+                                  className="rounded border-gray-300"
+                                  checked={!!selectedSplitItems[idx]}
+                                  onChange={(e) => {
+                                     const newSelected = {...selectedSplitItems};
+                                     if(e.target.checked) newSelected[idx] = item.quantity;
+                                     else delete newSelected[idx];
+                                     setSelectedSplitItems(newSelected);
+                                     
+                                     const totalSelected = Object.keys(newSelected).reduce((sum, key) => {
+                                        const i = (settleOrder?.items || [])[parseInt(key)];
+                                        return sum + (parseFloat(i.totalPrice || "0"));
+                                     }, 0);
+                                     
+                                     const stTotal = parseFloat(settleOrder?.total || "0");
+                                     setSettleSplitCard(parseFloat(totalSelected.toFixed(2)));
+                                     setSettleSplitCash(parseFloat((stTotal - totalSelected).toFixed(2)));
+                                  }}
+                               />
+                               <span>{item.itemName || "Item"} x{item.quantity}</span>
+                            </div>
+                            <span>{parseFloat(item.totalPrice || "0").toFixed(2)}</span>
+                          </div>
+                       ))}
+                    </div>
+                  )}
+
                   {/* Quick split buttons */}
                   <div className="flex gap-2">
                     {[
@@ -1571,7 +1711,7 @@ export default function POSPage() {
                       return (
                         <div className="flex items-center gap-2 p-2 bg-red-100 dark:bg-red-900/30 rounded-lg">
                           <span className="text-xs text-red-600 dark:text-red-400 font-medium">
-                            {language === "ar" ? "المتبقي" : "Remaining"}: {(stTotal - splitSum).toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                            {language === "ar" ? "المتبقي" : "Remaining"}: {(stTotal - splitSum).toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                           </span>
                         </div>
                       );

@@ -402,7 +402,7 @@ export default function CustomizationsPage() {
                             {language === "ar" ? variant.nameAr : variant.nameEn}
                           </div>
                           <div className="text-sm text-muted-foreground">
-                            {parseFloat(variant.priceModifier) >= 0 ? "+" : ""}{variant.priceModifier} {language === "ar" ? "ريال" : "SAR"}
+                            {parseFloat(variant.priceModifier) >= 0 ? "+" : ""}{variant.priceModifier} {language === "ar" ? "ر.س" : "SAR"}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -625,7 +625,7 @@ export default function CustomizationsPage() {
                                 <span>{language === "ar" ? option.nameAr : option.nameEn}</span>
                                 <div className="flex items-center gap-2">
                                   <span className="text-sm">
-                                    +{option.priceModifier} {language === "ar" ? "ريال" : "SAR"}
+                                    +{option.priceModifier} {language === "ar" ? "ر.س" : "SAR"}
                                   </span>
                                   <Button
                                     size="sm"

@@ -1,4 +1,4 @@
-import { LayoutDashboard, UtensilsCrossed, ClipboardList, Users, Settings, ShoppingCart, CookingPot, QrCode, Package, BarChart3, Tag, LogOut, UserCheck, FileText, Star } from "lucide-react";
+import { LayoutDashboard, UtensilsCrossed, Settings, QrCode, Package, BarChart3, Tag, LogOut, UserCheck, FileText, Star, ShoppingCart, ChefHat, ClipboardList, Grid, CalendarDays, Truck } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -38,11 +38,13 @@ export function AppSidebar() {
 
   const allMenuItems = [
     { title: t("dashboard"), url: "/", icon: LayoutDashboard, permission: user?.permDashboard },
-    { title: t("pos"), url: "/pos", icon: ShoppingCart, permission: user?.permPos },
-    { title: t("kitchen"), url: "/kitchen", icon: CookingPot, permission: user?.permKitchen },
+    { title: direction === "rtl" ? "نقطة البيع" : "POS", url: "/pos", icon: ShoppingCart, permission: user?.permPos },
+    { title: direction === "rtl" ? "المطبخ" : "Kitchen", url: "/kitchen", icon: ChefHat, permission: user?.permKitchen },
+    { title: direction === "rtl" ? "الطلبات" : "Orders", url: "/orders", icon: ClipboardList, permission: user?.permOrders },
+    { title: direction === "rtl" ? "الطاولات" : "Tables", url: "/tables", icon: Grid, permission: user?.permTables },
+    { title: direction === "rtl" ? "الحجوزات" : "Reservations", url: "/reservations", icon: CalendarDays, permission: user?.permTables },
+    { title: direction === "rtl" ? "التوصيل" : "Delivery", url: "/delivery-orders", icon: Truck, permission: user?.permOrders },
     { title: t("menu"), url: "/menu", icon: UtensilsCrossed, permission: user?.permMenu },
-    { title: t("orders"), url: "/orders", icon: ClipboardList, permission: user?.permOrders },
-    { title: direction === "rtl" ? "الطاولات والحجوزات" : "Tables & Reservations", url: "/tables", icon: Users, permission: user?.permTables },
     { title: t("qrCodes"), url: "/qr-codes", icon: QrCode, permission: user?.permQr },
     { title: t("inventory"), url: "/inventory", icon: Package, permission: user?.permInventory },
     { title: t("reports"), url: "/reports", icon: BarChart3, permission: user?.permReports },

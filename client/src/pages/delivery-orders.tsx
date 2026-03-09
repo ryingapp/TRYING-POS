@@ -311,7 +311,7 @@ export default function DeliveryOrdersPage() {
                         </div>
 
                         <div className="text-right">
-                          <div className="text-lg font-bold">{parseFloat(String(order.total || 0)).toFixed(2)} <span className="text-xs">{isRtl ? "ريال" : "SAR"}</span></div>
+                          <div className="text-lg font-bold">{parseFloat(String(order.total || 0)).toFixed(2)} <span className="text-xs">{isRtl ? "ر.س" : "SAR"}</span></div>
                           <div className="text-xs text-muted-foreground">{formatTime(order.createdAt)}</div>
                         </div>
                       </div>
@@ -371,7 +371,7 @@ export default function DeliveryOrdersPage() {
                               ))}
                               <div className="border-t pt-1 mt-1 flex justify-between text-sm font-medium">
                                 <span>{isRtl ? "المجموع" : "Total"}</span>
-                                <span>{parseFloat(String(order.total || 0)).toFixed(2)} {isRtl ? "ريال" : "SAR"}</span>
+                                <span>{parseFloat(String(order.total || 0)).toFixed(2)} {isRtl ? "ر.س" : "SAR"}</span>
                               </div>
                             </div>
                           )}

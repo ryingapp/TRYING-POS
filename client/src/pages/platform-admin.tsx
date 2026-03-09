@@ -650,7 +650,7 @@ export default function PlatformAdminPage() {
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="text-xs text-muted-foreground">{isAr ? "إجمالي الإيرادات" : "Total Revenue"}</p>
-                      <p className="text-2xl font-bold" data-testid="text-total-revenue">{stats?.totalRevenue || "0.00"} <span className="text-sm font-normal text-muted-foreground">{isAr ? "ريال" : "SAR"}</span></p>
+                      <p className="text-2xl font-bold" data-testid="text-total-revenue">{stats?.totalRevenue || "0.00"} <span className="text-sm font-normal text-muted-foreground">{isAr ? "ر.س" : "SAR"}</span></p>
                       <p className="text-xs text-muted-foreground mt-1">
                         <span className="font-semibold text-foreground">{stats?.todayRevenue || "0.00"}</span> {isAr ? "اليوم" : "today"}
                       </p>
@@ -771,7 +771,7 @@ export default function PlatformAdminPage() {
                               <ShoppingCart className="h-3 w-3 me-1" /> {restaurant.ordersCount}
                             </Badge>
                             <Badge variant="outline">
-                              <CircleDollarSign className="h-3 w-3 me-1" /> {restaurant.totalRevenue} {isAr ? "ريال" : "SAR"}
+                              <CircleDollarSign className="h-3 w-3 me-1" /> {restaurant.totalRevenue} {isAr ? "ر.س" : "SAR"}
                             </Badge>
                             <Badge variant="outline">
                               <Users className="h-3 w-3 me-1" /> {restaurant.usersCount}
@@ -869,7 +869,7 @@ export default function PlatformAdminPage() {
                             </div>
                             <div className="border rounded-md p-3 bg-background text-center">
                               <p className="text-lg font-bold">{restaurant.totalRevenue}</p>
-                              <p className="text-xs text-muted-foreground">{isAr ? "الإيرادات (ريال)" : "Revenue (SAR)"}</p>
+                              <p className="text-xs text-muted-foreground">{isAr ? "الإيرادات (ر.س)" : "Revenue (SAR)"}</p>
                             </div>
                             <div className="border rounded-md p-3 bg-background text-center">
                               <p className="text-lg font-bold">{restaurant.todayOrders}</p>

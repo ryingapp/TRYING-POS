@@ -32,6 +32,8 @@ export const restaurants = pgTable("restaurants", {
   serviceDelivery: boolean("service_delivery").default(true),
   serviceTableBooking: boolean("service_table_booking").default(false),
   serviceQueue: boolean("service_queue").default(false),
+  serviceKitchenScreen: boolean("service_kitchen_screen").default(true),
+  serviceQuickOrder: boolean("service_quick_order").default(false),
   // Reservation settings
   reservationDuration: integer("reservation_duration").default(90), // minutes
   reservationDepositAmount: decimal("reservation_deposit_amount", { precision: 10, scale: 2 }).default("20.00"),
@@ -39,6 +41,11 @@ export const restaurants = pgTable("restaurants", {
   // ZATCA/Tax fields
   vatNumber: text("vat_number"),
   commercialRegistration: text("commercial_registration"),
+  commercialRegistrationName: text("commercial_registration_name"), // اسم السجل التجاري (Organization Unit)
+  shortAddress: text("short_address"), // العنوان المختصر الوطني
+  registrationType: text("registration_type").default("CRN"), // CRN, MOM, MLS, 700, SAG, OTH
+  industry: text("industry").default("Food"), // نوع النشاط: Food, Commercial, etc.
+  invoiceType: text("invoice_type").default("1100"), // 1100=simplified+standard, 0100=standard, 1000=simplified
   postalCode: text("postal_code"),
   buildingNumber: text("building_number"),
   streetName: text("street_name"),
@@ -52,6 +59,10 @@ export const restaurants = pgTable("restaurants", {
   bankAccountNumber: text("bank_account_number"),
   bankSwift: text("bank_swift"),
   bankIban: text("bank_iban"),
+    // Zakat manager fields
+    zakatManagerName: text("zakat_manager_name"),
+    zakatManagerPhone: text("zakat_manager_phone"),
+    zakatManagerEmail: text("zakat_manager_email"),
   // Social media links
   socialInstagram: text("social_instagram"),
   socialTwitter: text("social_twitter"),
@@ -110,6 +121,34 @@ export const branches = pgTable("branches", {
   zatcaProductionCsid: text("zatca_production_csid"),
   zatcaPrivateKey: text("zatca_private_key"),
   createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ZATCA EGS Devices - each cashier/POS terminal is a separate device
+// Multiple devices per branch, each with independent ZATCA registration
+export const zatcaDevices = pgTable("zatca_devices", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  branchId: varchar("branch_id").references(() => branches.id).notNull(),
+  name: text("name").notNull(), // e.g. "كاشير 1", "Cashier 2"
+  nameAr: text("name_ar"),
+  serialNumber: text("serial_number"), // EGS serial e.g. "EGS1-314290052100003-00001"
+  isActive: boolean("is_active").default(true),
+  // ZATCA registration fields
+  zatcaRequestId: text("zatca_request_id"), // ZATCA compliance_request_id
+  zatcaEnvironment: text("zatca_environment").default("sandbox"),
+  zatcaComplianceCsid: text("zatca_compliance_csid"),
+  zatcaProductionCsid: text("zatca_production_csid"),
+  zatcaCertificate: text("zatca_certificate"),
+  zatcaCertificateExpiry: timestamp("zatca_certificate_expiry"),
+  zatcaSecretKey: text("zatca_secret_key"),
+  zatcaPrivateKey: text("zatca_private_key"),
+  // Invoice tracking per device
+  zatcaInvoiceCounter: integer("zatca_invoice_counter").default(0),
+  zatcaLastInvoiceHash: text("zatca_last_invoice_hash").default("NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYmVlYTI3OWI5MDRhNjId"),
+  // Registration status
+  registrationStep: integer("registration_step").default(0), // 0=none, 1=compliance, 2=checked, 3=production
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Users and roles
@@ -216,10 +255,24 @@ export const customers = pgTable("customers", {
   notes: text("notes"),
   totalOrders: integer("total_orders").default(0),
   totalSpent: decimal("total_spent", { precision: 10, scale: 2 }).default("0"),
+  pointsBalance: integer("points_balance").default(0),
+  loyaltyTier: text("loyalty_tier").default("bronze"), // bronze, silver, gold, platinum
   lastOrderAt: timestamp("last_order_at"),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Loyalty Transactions - سجل نقاط الولاء
+export const loyaltyTransactions = pgTable("loyalty_transactions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  customerId: varchar("customer_id").references(() => customers.id).notNull(),
+  orderId: varchar("order_id").references(() => orders.id),
+  type: text("type").notNull(), // earn, redeem, adjust, expire
+  points: integer("points").notNull(), // positive for earn, negative for redeem
+  description: text("description"),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 // Orders
@@ -238,12 +291,14 @@ export const orders = pgTable("orders", {
   customerAddress: text("customer_address"),
   notes: text("notes"),
   kitchenNotes: text("kitchen_notes"),
+  waiterId: varchar("waiter_id").references(() => users.id),
   subtotal: decimal("subtotal", { precision: 10, scale: 2 }).default("0"),
   discount: decimal("discount", { precision: 10, scale: 2 }).default("0"),
   deliveryFee: decimal("delivery_fee", { precision: 10, scale: 2 }).default("0"),
   tax: decimal("tax", { precision: 10, scale: 2 }).default("0"),
   total: decimal("total", { precision: 10, scale: 2 }).default("0"),
   paymentMethod: text("payment_method").default("cash"),
+  paymentStatus: text("payment_status").default("pending"), // pending, processing, authorized, paid, failed, refunded, partially_refunded
   isPaid: boolean("is_paid").default(false),
   daySessionId: varchar("day_session_id"),
   daySessionDate: varchar("day_session_date"),
@@ -261,12 +316,15 @@ export const orderItems = pgTable("order_items", {
   quantity: integer("quantity").notNull(),
   unitPrice: decimal("unit_price", { precision: 10, scale: 2 }).notNull(),
   totalPrice: decimal("total_price", { precision: 10, scale: 2 }).notNull(),
+  variantId: varchar("variant_id").references(() => menuItemVariants.id), // Link item to specific size/variant
   notes: text("notes"),
 });
 
 // Recipes - linking menu items to inventory (ingredients)
 export const recipes = pgTable("recipes", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  variantId: varchar("variant_id").references(() => menuItemVariants.id), // Link recipe to specific size/variant
+  customizationOptionId: varchar("customization_option_id").references(() => customizationOptions.id), // Link recipe to extra option
   restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
   menuItemId: varchar("menu_item_id").references(() => menuItems.id).notNull(),
   inventoryItemId: varchar("inventory_item_id").references(() => inventoryItems.id).notNull(),
@@ -399,6 +457,29 @@ export const invoiceAuditLog = pgTable("invoice_audit_log", {
 });
 
 // ===============================
+// IMMUTABLE FINANCE LEDGER - دفتر مالي غير قابل للتلاعب (سلسلة تجزئة)
+// ===============================
+export const financeLedger = pgTable("finance_ledger", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").references(() => restaurants.id).notNull(),
+  branchId: varchar("branch_id").references(() => branches.id),
+  orderId: varchar("order_id").references(() => orders.id),
+  invoiceId: varchar("invoice_id").references(() => invoices.id),
+  paymentTransactionId: varchar("payment_transaction_id").references(() => paymentTransactions.id),
+  eventType: text("event_type").notNull(),
+  eventSource: text("event_source").notNull().default("server"),
+  amount: decimal("amount", { precision: 12, scale: 2 }),
+  currency: text("currency").default("SAR"),
+  idempotencyKey: text("idempotency_key"),
+  payload: text("payload"),
+  previousEntryHash: text("previous_entry_hash"),
+  entryHash: text("entry_hash").notNull(),
+  createdBy: varchar("created_by").references(() => users.id),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ===============================
 // PAYMENT TRANSACTIONS - سجل المعاملات المالية
 // ===============================
 export const paymentTransactions = pgTable("payment_transactions", {
@@ -468,6 +549,7 @@ export const reservations = pgTable("reservations", {
   source: text("source").default("website"), // website, phone, walk_in, app
   depositAmount: decimal("deposit_amount", { precision: 10, scale: 2 }).default("20.00"),
   depositPaid: boolean("deposit_paid").default(false),
+  depositCode: text("deposit_code"), // Unique code for customer to redeem deposit (e.g., "RES-A7X2")
   depositAppliedToOrder: varchar("deposit_applied_to_order"),
   reminderSent: boolean("reminder_sent").default(false),
   createdAt: timestamp("created_at").defaultNow(),
@@ -823,10 +905,13 @@ export const insertInventoryTransactionSchema = createInsertSchema(inventoryTran
 export const insertRecipeSchema = createInsertSchema(recipes).omit({ id: true, createdAt: true });
 export const insertPrinterSchema = createInsertSchema(printers).omit({ id: true, createdAt: true });
 export const insertPaymentTransactionSchema = createInsertSchema(paymentTransactions).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertFinanceLedgerSchema = createInsertSchema(financeLedger).omit({ id: true, createdAt: true });
 // EdfaPay insert schemas
 export const insertEdfapayMerchantSchema = createInsertSchema(edfapayMerchants).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertEdfapayInvoiceSchema = createInsertSchema(edfapayInvoices).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertInvoiceAuditLogSchema = createInsertSchema(invoiceAuditLog).omit({ id: true, createdAt: true });
+export const insertZatcaDeviceSchema = createInsertSchema(zatcaDevices).omit({ id: true, createdAt: true, updatedAt: true });
+export const insertLoyaltyTransactionSchema = createInsertSchema(loyaltyTransactions).omit({ id: true, createdAt: true });
 
 // New Insert Schemas for added features
 export const insertReservationSchema = createInsertSchema(reservations).omit({ id: true, createdAt: true, updatedAt: true });
@@ -882,6 +967,8 @@ export type Printer = typeof printers.$inferSelect;
 export type InsertPrinter = z.infer<typeof insertPrinterSchema>;
 export type PaymentTransaction = typeof paymentTransactions.$inferSelect;
 export type InsertPaymentTransaction = z.infer<typeof insertPaymentTransactionSchema>;
+export type FinanceLedger = typeof financeLedger.$inferSelect;
+export type InsertFinanceLedger = z.infer<typeof insertFinanceLedgerSchema>;
 // EdfaPay types
 export type EdfapayMerchant = typeof edfapayMerchants.$inferSelect;
 export type InsertEdfapayMerchant = z.infer<typeof insertEdfapayMerchantSchema>;
@@ -926,11 +1013,16 @@ export type InsertKitchenSection = z.infer<typeof insertKitchenSectionSchema>;
 export type InvoiceAuditLog = typeof invoiceAuditLog.$inferSelect;
 export type InsertInvoiceAuditLog = z.infer<typeof insertInvoiceAuditLogSchema>;
 
+export type LoyaltyTransaction = typeof loyaltyTransactions.$inferSelect;
+export type InsertLoyaltyTransaction = z.infer<typeof insertLoyaltyTransactionSchema>;
+
 // Delivery Integration Types
 export type DeliveryIntegration = typeof deliveryIntegrations.$inferSelect;
 export type InsertDeliveryIntegration = z.infer<typeof insertDeliveryIntegrationSchema>;
 export type DeliveryOrder = typeof deliveryOrders.$inferSelect;
 export type InsertDeliveryOrder = z.infer<typeof insertDeliveryOrderSchema>;
+export type ZatcaDevice = typeof zatcaDevices.$inferSelect;
+export type InsertZatcaDevice = z.infer<typeof insertZatcaDeviceSchema>;
 
 // Extended types for frontend
 export type OrderWithItems = Order & { items: (OrderItem & { menuItem: MenuItem })[] };

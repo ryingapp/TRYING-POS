@@ -97,11 +97,13 @@ export default function KitchenPage() {
 
   const { data: kitchenSections } = useQuery<KitchenSection[]>({
     queryKey: [`/api/kitchen-sections${branchParam}`],
+    refetchInterval: 30000,
   });
 
   const { data: orders, isLoading, refetch } = useQuery<OrderWithDetails[]>({
     queryKey: [`/api/kitchen/orders${queryParams}`],
-    refetchInterval: 30000, // 30 seconds as fallback (WebSocket is primary)
+    refetchInterval: 8000,
+    staleTime: 5000,
   });
 
   useEffect(() => {
@@ -503,16 +505,28 @@ export default function KitchenPage() {
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      {order.items && order.items.length > 0 && (
-                        <div className="space-y-1">
+                      {order.items && order.items.length > 0 ? (
+                        <div className="space-y-2">
                           {order.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
-                              <span className="font-medium">
-                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
-                              </span>
-                              <Badge variant="secondary">{item.quantity}x</Badge>
+                            <div key={idx} className="p-2 bg-muted/50 rounded-md">
+                              <div className="flex justify-between items-center">
+                                <span className="font-semibold text-sm">
+                                  {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || (language === "ar" ? "صنف غير محدد" : "Unknown Item"))}
+                                </span>
+                                <Badge variant="secondary" className="text-base font-bold px-3">{item.quantity}x</Badge>
+                              </div>
+                              {item.notes && (
+                                <div className="mt-2 p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded text-sm flex items-start gap-2">
+                                  <span className="text-yellow-600 dark:text-yellow-400">⚠</span>
+                                  <span className="text-yellow-800 dark:text-yellow-200">{item.notes}</span>
+                                </div>
+                              )}
                             </div>
                           ))}
+                        </div>
+                      ) : (
+                        <div className="p-3 bg-muted/30 rounded-md text-center text-muted-foreground text-sm">
+                          {language === "ar" ? "لا توجد أصناف" : "No items"}
                         </div>
                       )}
 
@@ -522,9 +536,9 @@ export default function KitchenPage() {
                         </div>
                       )}
                       
-                      {order.orderType === "delivery" && order.notes && (
-                        <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
-                          <strong>🛵 {language === "ar" ? "توصيل" : "Delivery"}:</strong> {order.notes}
+                      {order.notes && (
+                        <div className="p-2 bg-red-100 dark:bg-red-900/20 rounded-md text-sm border border-red-200 dark:border-red-800">
+                          <strong className="text-red-600 dark:text-red-400">📝 {language === "ar" ? "ملاحظات:" : "Notes:"}</strong> {order.notes}
                         </div>
                       )}
 
@@ -603,22 +617,40 @@ export default function KitchenPage() {
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      {order.items && order.items.length > 0 && (
-                        <div className="space-y-1">
+                      {order.items && order.items.length > 0 ? (
+                        <div className="space-y-2">
                           {order.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
-                              <span className="font-medium">
-                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
-                              </span>
-                              <Badge variant="secondary">{item.quantity}x</Badge>
+                            <div key={idx} className="p-2 bg-muted/50 rounded-md">
+                              <div className="flex justify-between items-center">
+                                <span className="font-semibold text-sm">
+                                  {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || (language === "ar" ? "صنف غير محدد" : "Unknown Item"))}
+                                </span>
+                                <Badge variant="secondary" className="text-base font-bold px-3">{item.quantity}x</Badge>
+                              </div>
+                              {item.notes && (
+                                <div className="mt-2 p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded text-sm flex items-start gap-2">
+                                  <span className="text-yellow-600 dark:text-yellow-400">⚠</span>
+                                  <span className="text-yellow-800 dark:text-yellow-200">{item.notes}</span>
+                                </div>
+                              )}
                             </div>
                           ))}
+                        </div>
+                      ) : (
+                        <div className="p-3 bg-muted/30 rounded-md text-center text-muted-foreground text-sm">
+                          {language === "ar" ? "لا توجد أصناف" : "No items"}
                         </div>
                       )}
 
                       {order.kitchenNotes && (
                         <div className="p-2 bg-orange-100 dark:bg-orange-900/20 rounded-md text-sm">
                           <strong>{t("kitchenNotes")}:</strong> {order.kitchenNotes}
+                        </div>
+                      )}
+
+                      {order.notes && (
+                        <div className="p-2 bg-red-100 dark:bg-red-900/20 rounded-md text-sm border border-red-200 dark:border-red-800">
+                          <strong className="text-red-600 dark:text-red-400">📝 {language === "ar" ? "ملاحظات:" : "Notes:"}</strong> {order.notes}
                         </div>
                       )}
 
@@ -691,16 +723,28 @@ export default function KitchenPage() {
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                      {order.items && order.items.length > 0 && (
-                        <div className="space-y-1">
+                      {order.items && order.items.length > 0 ? (
+                        <div className="space-y-2">
                           {order.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between items-center text-sm p-1 bg-muted/50 rounded">
-                              <span className="font-medium">
-                                {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || "Item")}
-                              </span>
-                              <Badge variant="secondary">{item.quantity}x</Badge>
+                            <div key={idx} className="p-2 bg-muted/50 rounded-md">
+                              <div className="flex justify-between items-center">
+                                <span className="font-semibold text-sm">
+                                  {item.menuItem ? getLocalizedName(item.menuItem.nameEn, item.menuItem.nameAr) : (item.itemName || (language === "ar" ? "صنف غير محدد" : "Unknown Item"))}
+                                </span>
+                                <Badge variant="secondary" className="text-base font-bold px-3">{item.quantity}x</Badge>
+                              </div>
+                              {item.notes && (
+                                <div className="mt-2 p-2 bg-yellow-100 dark:bg-yellow-900/30 rounded text-sm flex items-start gap-2">
+                                  <span className="text-yellow-600 dark:text-yellow-400">⚠</span>
+                                  <span className="text-yellow-800 dark:text-yellow-200">{item.notes}</span>
+                                </div>
+                              )}
                             </div>
                           ))}
+                        </div>
+                      ) : (
+                        <div className="p-3 bg-muted/30 rounded-md text-center text-muted-foreground text-sm">
+                          {language === "ar" ? "لا توجد أصناف" : "No items"}
                         </div>
                       )}
 
@@ -710,9 +754,9 @@ export default function KitchenPage() {
                         </div>
                       )}
 
-                      {order.orderType === "delivery" && order.notes && (
-                        <div className="p-2 bg-green-100 dark:bg-green-900/20 rounded-md text-sm">
-                          <strong>🛵 {language === "ar" ? "توصيل" : "Delivery"}:</strong> {order.notes}
+                      {order.notes && (
+                        <div className="p-2 bg-red-100 dark:bg-red-900/20 rounded-md text-sm border border-red-200 dark:border-red-800">
+                          <strong className="text-red-600 dark:text-red-400">📝 {language === "ar" ? "ملاحظات:" : "Notes:"}</strong> {order.notes}
                         </div>
                       )}
 

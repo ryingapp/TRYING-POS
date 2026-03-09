@@ -40,12 +40,36 @@ export default function LoginPage() {
 
   const tx = (key: keyof typeof texts) => texts[key][language];
 
+  // Get first allowed page based on user permissions
+  const getFirstAllowedPage = (user: any) => {
+    if (!user) return "/";
+    // Owner/platform_admin/branch_manager have all permissions
+    if (user.role === 'owner' || user.role === 'platform_admin' || user.role === 'branch_manager') {
+      return "/";
+    }
+    // Check permissions in order of priority
+    if (user.permPos) return "/pos";
+    if (user.permKitchen) return "/kitchen";
+    if (user.permOrders) return "/orders";
+    if (user.permDashboard) return "/";
+    if (user.permTables) return "/tables";
+    if (user.permReports) return "/reports";
+    if (user.permMenu) return "/menu";
+    if (user.permInventory) return "/inventory";
+    if (user.permSettings) return "/settings";
+    if (user.permMarketing) return "/customers";
+    if (user.permReviews) return "/reviews";
+    if (user.permQr) return "/qr-codes";
+    return "/";
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) return;
     try {
-      await login(email, password);
-      setLocation("/");
+      const loggedInUser = await login(email, password);
+      const redirectPath = getFirstAllowedPage(loggedInUser);
+      setLocation(redirectPath);
     } catch (error: any) {
       const msg = error?.message || "";
       let errorMsg = tx("loginError");

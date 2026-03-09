@@ -699,7 +699,7 @@ function InventoryReports({ items }: { items: InventoryItem[] }) {
   const handleExportPDF = () => generateInventoryPDF({
     language,
     restaurantName: restaurant?.name || "Restaurant",
-    branchName: selectedBranch ? (ar ? selectedBranch.nameAr : selectedBranch.name) : undefined,
+    branchName: selectedBranch ? (ar ? selectedBranch.nameAr || undefined : selectedBranch.name) : undefined,
     items,
     lowStockItems,
     totalValue,

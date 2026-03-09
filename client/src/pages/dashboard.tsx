@@ -65,6 +65,8 @@ export default function Dashboard() {
 
   const { data: orders, isLoading: ordersLoading } = useQuery<Order[]>({
     queryKey: [`/api/orders${branchParam}`],
+    refetchInterval: 15000,
+    staleTime: 10000,
   });
 
   const { data: menuItems, isLoading: itemsLoading } = useQuery<MenuItem[]>({
@@ -73,6 +75,8 @@ export default function Dashboard() {
 
   const { data: tables, isLoading: tablesLoading } = useQuery<Table[]>({
     queryKey: [`/api/tables${branchParam}`],
+    refetchInterval: 15000,
+    staleTime: 10000,
   });
 
   const isLoading = ordersLoading || itemsLoading || tablesLoading;

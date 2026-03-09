@@ -93,11 +93,14 @@ export default function ReservationsPage() {
       const response = await apiRequest("GET", `/api/reservations?date=${format(selectedDate, "yyyy-MM-dd")}${branchParam}`);
       return response.json();
     },
+    refetchInterval: 15000,
+    staleTime: 10000,
   });
 
   // Fetch tables
   const { data: tables = [] } = useQuery<TableData[]>({
     queryKey: [`/api/tables${branchParamFirst}`],
+    refetchInterval: 30000,
   });
 
   // Create reservation
@@ -474,7 +477,7 @@ export default function ReservationsPage() {
                       <TableCell>
                         {reservation.depositPaid ? (
                           <Badge variant="default" className="bg-green-600">
-                            {language === "ar" ? "مدفوع" : "Paid"} ({parseFloat(reservation.depositAmount || "0").toFixed(0)} {language === "ar" ? "ريال" : "SAR"})
+                            {language === "ar" ? "مدفوع" : "Paid"} ({parseFloat(reservation.depositAmount || "0").toFixed(0)} {language === "ar" ? "ر.س" : "SAR"})
                           </Badge>
                         ) : (
                           <Badge variant="secondary">

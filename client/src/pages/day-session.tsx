@@ -287,7 +287,7 @@ export default function DaySessionPage() {
 
   const formatCurrency = (amount: string | number | null | undefined) => {
     const num = parseFloat(String(amount || 0));
-    return `${num.toFixed(2)} ${language === "ar" ? "ريال" : "SAR"}`;
+    return `${num.toFixed(2)} ${language === "ar" ? "ر.س" : "SAR"}`;
   };
 
   const formatTime = (date: Date | string | null | undefined) => {

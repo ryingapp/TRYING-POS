@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,6 +38,8 @@ export default function PublicReservePage() {
   const [createdReservation, setCreatedReservation] = useState<any>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [isPaymentFormLoaded, setIsPaymentFormLoaded] = useState(false);
+  const formInitialized = useRef(false);
 
   const { data: restaurant, isLoading } = useQuery<any>({
     queryKey: [`/api/public/${restaurantId}/restaurant`],
@@ -68,12 +70,12 @@ export default function PublicReservePage() {
       seats: { en: "seats", ar: "مقاعد" },
       specialRequests: { en: "Special Requests (Optional)", ar: "طلبات خاصة (اختياري)" },
       specialRequestsPlaceholder: { en: "Any special requests or notes...", ar: "أي طلبات خاصة أو ملاحظات..." },
-      depositNote: { en: `A booking fee of ${depositAmount} SAR is required and will be deducted from the final bill`, ar: `رسوم حجز ${depositAmount} ريال تُخصم من الفاتورة النهائية عند الحضور` },
+      depositNote: { en: `A booking fee of ${depositAmount} SAR is required and will be deducted from the final bill`, ar: `رسوم حجز ${depositAmount} ر.س تُخصم من الفاتورة النهائية عند الحضور` },
       submit: { en: "Submit Reservation", ar: "تأكيد الحجز" },
       submitting: { en: "Submitting...", ar: "جاري الإرسال..." },
       success: { en: "Reservation Submitted!", ar: "تم إرسال الحجز!" },
       successDesc: { en: "Your reservation has been submitted. The restaurant will confirm it shortly.", ar: "تم إرسال حجزك. المطعم سيؤكده قريباً." },
-      depositReminder: { en: `Remember: A ${depositAmount} SAR booking fee will be collected and deducted from your bill.`, ar: `تذكير: رسوم الحجز ${depositAmount} ريال تُخصم من فاتورتك النهائية.` },
+      depositReminder: { en: `Remember: A ${depositAmount} SAR booking fee will be collected and deducted from your bill.`, ar: `تذكير: رسوم الحجز ${depositAmount} ر.س تُخصم من فاتورتك النهائية.` },
       backToHome: { en: "Back to Home", ar: "العودة للرئيسية" },
       makeAnother: { en: "Make Another Reservation", ar: "حجز آخر" },
       required: { en: "Please fill in all required fields", ar: "يرجى تعبئة جميع الحقول المطلوبة" },
@@ -285,7 +287,7 @@ export default function PublicReservePage() {
                   {language === "ar" ? "رسوم الحجز" : "Booking Fee"}
                 </span>
                 <span className="text-2xl font-bold text-blue-600 dark:text-blue-400">
-                  {parseFloat(depositAmount).toFixed(2)} {language === "ar" ? "ريال" : "SAR"}
+                  {parseFloat(depositAmount).toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">

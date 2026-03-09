@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useParams, useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CheckCircle2, XCircle, Loader2, Globe, CalendarCheck } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, Globe, CalendarCheck, Copy, Check } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 
 export default function ReservationPaymentCallbackPage() {
@@ -11,6 +11,8 @@ export default function ReservationPaymentCallbackPage() {
   const { language, setLanguage, direction } = useLanguage();
   const [status, setStatus] = useState<"loading" | "success" | "failed">("loading");
   const [message, setMessage] = useState("");
+  const [depositCode, setDepositCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const toggleLanguage = () => {
     setLanguage(language === "ar" ? "en" : "ar");
@@ -21,30 +23,58 @@ export default function ReservationPaymentCallbackPage() {
   const branchQuery = branchParam ? `?b=${branchParam}` : "";
 
   useEffect(() => {
+    let completed = false;
     const verifyPayment = async () => {
+      if (completed) return;
+      completed = true;
       try {
         const urlParams = new URLSearchParams(window.location.search);
-        const paymentId = urlParams.get("id");
+        const transId = urlParams.get("trans_id") || urlParams.get("id");
+        const paymentStatus = urlParams.get("status");
 
-        if (!paymentId) {
+        // Check for explicit failure
+        if (paymentStatus === "fail" || paymentStatus === "failed" || paymentStatus === "declined") {
           setStatus("failed");
-          setMessage(language === "ar" ? "معرّف الدفع غير موجود" : "Payment ID not found");
+          setMessage(language === "ar" ? "لم يتم إكمال الدفع" : "Payment was not completed");
           return;
         }
 
-        const response = await fetch(`/api/public/${restaurantId}/reservation-payment-complete`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reservationId, paymentId }),
-        });
+        // Retry logic to wait for webhook
+        const maxRetries = 4;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+          }
+          
+          const response = await fetch(`/api/public/${restaurantId}/reservation-payment-complete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              reservationId, 
+              transId,
+              gwayId: transId, // EdfaPay uses trans_id for verification
+            }),
+          });
 
-        if (response.ok) {
-          setStatus("success");
-          setMessage(language === "ar" ? "تم دفع رسوم الحجز بنجاح" : "Booking fee paid successfully");
-        } else {
-          const errorData = await response.json().catch(() => ({}));
-          setStatus("failed");
-          setMessage(errorData.error || (language === "ar" ? "فشل الدفع" : "Payment failed"));
+          if (response.ok) {
+            const data = await response.json();
+            setStatus("success");
+            setMessage(language === "ar" ? "تم دفع رسوم الحجز بنجاح" : "Booking fee paid successfully");
+            if (data.depositCode) {
+              setDepositCode(data.depositCode);
+            } else if (data.reservation?.depositCode) {
+              setDepositCode(data.reservation.depositCode);
+            }
+            return;
+          } else {
+            const errorData = await response.json().catch(() => ({}));
+            console.log(`Reservation payment verification attempt ${attempt + 1}/${maxRetries}: ${errorData.error || "failed"}`);
+            // Continue retrying unless it's a definitive error
+            if (attempt === maxRetries - 1) {
+              setStatus("failed");
+              setMessage(errorData.error || (language === "ar" ? "فشل الدفع" : "Payment failed"));
+            }
+          }
         }
       } catch (err) {
         console.error("Payment verification error:", err);
@@ -93,6 +123,40 @@ export default function ReservationPaymentCallbackPage() {
                   </h2>
                   <p className="text-muted-foreground">{message}</p>
                 </div>
+                
+                {/* Deposit Code Display */}
+                {depositCode && (
+                  <Card className="border-2 border-blue-500 bg-blue-50 dark:bg-blue-900/20">
+                    <CardContent className="p-4 text-center">
+                      <p className="text-sm text-blue-600 dark:text-blue-400 mb-2">
+                        {language === "ar" ? "كود خصم العربون" : "Deposit Redemption Code"}
+                      </p>
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="text-2xl font-mono font-bold text-blue-700 dark:text-blue-300 tracking-wider">
+                          {depositCode}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0"
+                          onClick={() => {
+                            navigator.clipboard.writeText(depositCode);
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                          }}
+                        >
+                          {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-blue-500 dark:text-blue-400 mt-2">
+                        {language === "ar" 
+                          ? "استخدم هذا الكود في خانة الكوبون عند الطلب" 
+                          : "Use this code in the coupon field when ordering"}
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+                
                 <Card className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20">
                   <CardContent className="p-4 text-sm text-green-800 dark:text-green-200 flex items-center gap-2">
                     <CalendarCheck className="h-4 w-4 flex-shrink-0" />

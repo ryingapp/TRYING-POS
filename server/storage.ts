@@ -3,6 +3,7 @@ import {
   edfapayMerchants, edfapayInvoices,
   reservations, promotions, coupons, couponUsage, reviews, menuItemVariants, customizationGroups, customizationOptions, menuItemCustomizations, orderItemCustomizations, queueEntries, queueCounters,
   daySessions, cashTransactions, notifications, notificationSettings, customers, orderAuditLog, kitchenSections, invoiceAuditLog,
+  financeLedger,
   deliveryIntegrations, deliveryOrders,
   type Restaurant, type InsertRestaurant,
   type Category, type InsertCategory,
@@ -18,6 +19,7 @@ import {
   type Recipe, type InsertRecipe,
   type Printer, type InsertPrinter,
   type PaymentTransaction, type InsertPaymentTransaction,
+  type FinanceLedger, type InsertFinanceLedger,
   type EdfapayMerchant, type InsertEdfapayMerchant,
   type EdfapayInvoice, type InsertEdfapayInvoice,
   type Reservation, type InsertReservation,
@@ -41,6 +43,10 @@ import {
   type InvoiceAuditLog, type InsertInvoiceAuditLog,
   type DeliveryIntegration, type InsertDeliveryIntegration,
   type DeliveryOrder, type InsertDeliveryOrder,
+  zatcaDevices,
+  type ZatcaDevice, type InsertZatcaDevice,
+  loyaltyTransactions,
+  type LoyaltyTransaction, type InsertLoyaltyTransaction,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, asc, sql, and, gte, lte, or, isNull } from "drizzle-orm";
@@ -116,6 +122,20 @@ export interface IStorage {
   updateBranch(id: string, data: Partial<InsertBranch>): Promise<Branch | undefined>;
   deleteBranch(id: string): Promise<void>;
   
+  // ZATCA Devices (EGS)
+  getZatcaDevices(branchId: string): Promise<ZatcaDevice[]>;
+  getZatcaDevice(id: string): Promise<ZatcaDevice | undefined>;
+  getZatcaDeviceBySerial(serialNumber: string): Promise<ZatcaDevice | undefined>;
+  createZatcaDevice(data: InsertZatcaDevice): Promise<ZatcaDevice>;
+  updateZatcaDevice(id: string, data: Partial<InsertZatcaDevice>): Promise<ZatcaDevice | undefined>;
+  deleteZatcaDevice(id: string): Promise<void>;
+  getActiveZatcaDevice(branchId: string): Promise<ZatcaDevice | undefined>;
+
+  // Loyalty
+  getLoyaltyTransactions(customerId: string): Promise<LoyaltyTransaction[]>;
+  createLoyaltyTransaction(data: InsertLoyaltyTransaction): Promise<LoyaltyTransaction>;
+  getCustomerPoints(customerId: string): Promise<number>;
+  
   // Users
   getUsers(restaurantId: string): Promise<User[]>;
   getUser(id: string): Promise<User | undefined>;
@@ -178,6 +198,9 @@ export interface IStorage {
   getPaymentTransaction(id: string): Promise<PaymentTransaction | undefined>;
   createPaymentTransaction(data: InsertPaymentTransaction): Promise<PaymentTransaction>;
   updatePaymentTransaction(id: string, data: Partial<InsertPaymentTransaction>): Promise<PaymentTransaction | undefined>;
+  createFinanceLedgerEntry(data: InsertFinanceLedger): Promise<FinanceLedger>;
+  getLatestFinanceLedgerEntry(restaurantId: string): Promise<FinanceLedger | undefined>;
+  getFinanceLedgerByOrder(orderId: string): Promise<FinanceLedger[]>;
 
   // EdfaPay Merchants
   getEdfapayMerchant(restaurantId: string): Promise<EdfapayMerchant | undefined>;
@@ -197,6 +220,7 @@ export interface IStorage {
   // ===============================
   getReservations(restaurantId: string, branchId?: string, date?: Date): Promise<Reservation[]>;
   getReservation(id: string): Promise<Reservation | undefined>;
+  getReservationByDepositCode(restaurantId: string, depositCode: string): Promise<Reservation | undefined>;
   createReservation(data: InsertReservation): Promise<Reservation>;
   checkTableConflict(restaurantId: string, tableId: string, date: Date, time: string, duration?: number, excludeId?: string): Promise<Reservation | undefined>;
   updateReservation(id: string, data: Partial<InsertReservation>): Promise<Reservation | undefined>;
@@ -352,12 +376,15 @@ export class DatabaseStorage implements IStorage {
     } catch (e: any) {
       // slug lookup failed, try by ID
     }
-    // Then try by ID
-    try {
-      const byId = await this.getRestaurantById(idOrSlug);
-      if (byId) return byId.id;
-    } catch (e: any) {
-      // id lookup failed
+    // Then try by ID if it's a valid UUID
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (uuidRegex.test(idOrSlug)) {
+      try {
+        const byId = await this.getRestaurantById(idOrSlug);
+        if (byId) return byId.id;
+      } catch (e: any) {
+        // id lookup failed
+      }
     }
     return null;
   }
@@ -497,13 +524,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createMenuItem(data: InsertMenuItem): Promise<MenuItem> {
-    const [item] = await db.insert(menuItems).values(data).returning();
+    const [item] = await db.insert(menuItems).values(data as any).returning();
     return item;
   }
 
   async updateMenuItem(id: string, data: InsertMenuItem): Promise<MenuItem | undefined> {
     const [updated] = await db.update(menuItems)
-      .set(data)
+      .set(data as any)
       .where(eq(menuItems.id, id))
       .returning();
     return updated;
@@ -798,11 +825,51 @@ export class DatabaseStorage implements IStorage {
 
   async deleteBranch(id: string): Promise<void> {
     // Cascade: clean up branch-specific data
+    await db.delete(zatcaDevices).where(eq(zatcaDevices.branchId, id));
     await db.delete(tables).where(eq(tables.branchId, id));
     await db.delete(reservations).where(eq(reservations.branchId, id));
     await db.delete(printers).where(eq(printers.branchId, id));
     await db.delete(queueCounters).where(eq(queueCounters.branchId, id));
     await db.delete(branches).where(eq(branches.id, id));
+  }
+
+  // ZATCA Devices (EGS)
+  async getZatcaDevices(branchId: string): Promise<ZatcaDevice[]> {
+    return db.select().from(zatcaDevices).where(eq(zatcaDevices.branchId, branchId));
+  }
+
+  async getZatcaDevice(id: string): Promise<ZatcaDevice | undefined> {
+    const [device] = await db.select().from(zatcaDevices).where(eq(zatcaDevices.id, id));
+    return device;
+  }
+
+  async getZatcaDeviceBySerial(serialNumber: string): Promise<ZatcaDevice | undefined> {
+    const [device] = await db.select().from(zatcaDevices).where(eq(zatcaDevices.serialNumber, serialNumber));
+    return device;
+  }
+
+  async createZatcaDevice(data: InsertZatcaDevice): Promise<ZatcaDevice> {
+    const [device] = await db.insert(zatcaDevices).values(data).returning();
+    return device;
+  }
+
+  async updateZatcaDevice(id: string, data: Partial<InsertZatcaDevice>): Promise<ZatcaDevice | undefined> {
+    const [updated] = await db.update(zatcaDevices)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(zatcaDevices.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteZatcaDevice(id: string): Promise<void> {
+    await db.delete(zatcaDevices).where(eq(zatcaDevices.id, id));
+  }
+
+  async getActiveZatcaDevice(branchId: string): Promise<ZatcaDevice | undefined> {
+    const [device] = await db.select().from(zatcaDevices)
+      .where(and(eq(zatcaDevices.branchId, branchId), eq(zatcaDevices.isActive, true)))
+      .limit(1);
+    return device;
   }
 
   // Users
@@ -1211,6 +1278,39 @@ export class DatabaseStorage implements IStorage {
     return tx;
   }
 
+  async createFinanceLedgerEntry(data: InsertFinanceLedger): Promise<FinanceLedger> {
+    const [entry] = await db.insert(financeLedger).values(data as any).returning();
+    return entry;
+  }
+
+  async getLatestFinanceLedgerEntry(restaurantId: string): Promise<FinanceLedger | undefined> {
+    try {
+      const [entry] = await db.select().from(financeLedger)
+        .where(eq(financeLedger.restaurantId, restaurantId))
+        .orderBy(desc(financeLedger.createdAt))
+        .limit(1);
+      return entry;
+    } catch (error: any) {
+      if (String(error?.message || error).includes("finance_ledger")) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  async getFinanceLedgerByOrder(orderId: string): Promise<FinanceLedger[]> {
+    try {
+      return await db.select().from(financeLedger)
+        .where(eq(financeLedger.orderId, orderId))
+        .orderBy(asc(financeLedger.createdAt));
+    } catch (error: any) {
+      if (String(error?.message || error).includes("finance_ledger")) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   async updatePaymentTransaction(id: string, data: Partial<InsertPaymentTransaction>): Promise<PaymentTransaction | undefined> {
     const [updated] = await db.update(paymentTransactions)
       .set({ ...data, updatedAt: new Date() } as any)
@@ -1290,6 +1390,16 @@ export class DatabaseStorage implements IStorage {
 
   async getReservation(id: string): Promise<Reservation | undefined> {
     const [reservation] = await db.select().from(reservations).where(eq(reservations.id, id));
+    return reservation;
+  }
+
+  async getReservationByDepositCode(restaurantId: string, depositCode: string): Promise<Reservation | undefined> {
+    const [reservation] = await db.select().from(reservations).where(
+      and(
+        eq(reservations.restaurantId, restaurantId),
+        eq(reservations.depositCode, depositCode)
+      )
+    );
     return reservation;
   }
 
@@ -2145,13 +2255,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createDeliveryOrder(data: InsertDeliveryOrder): Promise<DeliveryOrder> {
-    const [order] = await db.insert(deliveryOrders).values(data).returning();
+    const [order] = await db.insert(deliveryOrders).values(data as any).returning();
     return order;
   }
 
   async updateDeliveryOrder(id: string, data: Partial<InsertDeliveryOrder>): Promise<DeliveryOrder | undefined> {
     const [updated] = await db.update(deliveryOrders)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...data, updatedAt: new Date() } as any)
       .where(eq(deliveryOrders.id, id))
       .returning();
     return updated;
@@ -2171,6 +2281,38 @@ export class DatabaseStorage implements IStorage {
       .where(eq(deliveryOrders.id, id))
       .returning();
     return updated;
+  }
+
+  // Loyalty
+  async getLoyaltyTransactions(customerId: string): Promise<LoyaltyTransaction[]> {
+    return db.select()
+      .from(loyaltyTransactions)
+      .where(eq(loyaltyTransactions.customerId, customerId))
+      .orderBy(desc(loyaltyTransactions.createdAt));
+  }
+
+  async createLoyaltyTransaction(data: InsertLoyaltyTransaction): Promise<LoyaltyTransaction> {
+    const [transaction] = await db.insert(loyaltyTransactions)
+      .values(data as any)
+      .returning();
+      
+    // Update customer points balance
+    const customer = await this.getCustomer(data.customerId);
+    if (customer) {
+      const currentPoints = customer.pointsBalance || 0;
+      const newPoints = currentPoints + transaction.points;
+      
+      await db.update(customers)
+        .set({ pointsBalance: newPoints })
+        .where(eq(customers.id, data.customerId));
+    }
+    
+    return transaction;
+  }
+
+  async getCustomerPoints(customerId: string): Promise<number> {
+    const customer = await this.getCustomer(customerId);
+    return customer?.pointsBalance || 0;
   }
 }
 

@@ -73,10 +73,7 @@ const apiLimiter = rateLimit({
   validate: false, // Disable validation for proxy compatibility
 });
 
-app.use("/api/auth/login", authLimiter);
-app.use("/api/users/register", authLimiter);
-app.use("/api/", apiLimiter);
-
+// Body parsing middleware FIRST
 app.use(
   express.json({
     limit: "10mb",
@@ -87,6 +84,11 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false, limit: "10mb" }));
+
+// Rate limiting AFTER body parsing
+app.use("/api/auth/login", authLimiter);
+app.use("/api/users/register", authLimiter);
+app.use("/api/", apiLimiter);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {

@@ -101,13 +101,18 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       queryFn: getQueryFn({ on401: "throw" }),
-      refetchInterval: false,
-      refetchOnWindowFocus: true,
-      staleTime: 30_000, // 30 seconds - data auto-refreshes
+      refetchInterval: false, // WebSocket handles real-time updates
+      refetchOnWindowFocus: true, // Refresh when user returns to tab
+      refetchOnMount: "always", // Always fetch fresh data on component mount
+      refetchOnReconnect: true, // Refetch when internet reconnects
+      staleTime: 2_000, // 2 seconds - very fresh data for real-time feel
+      gcTime: 5 * 60 * 1000, // 5 minutes - keep unused data in cache
       retry: false,
+      networkMode: "online", // Only fetch when online
     },
     mutations: {
       retry: false,
+      networkMode: "online",
     },
   },
 });

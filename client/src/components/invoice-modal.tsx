@@ -152,7 +152,7 @@ export function InvoiceModal({ open, onClose, invoiceId, orderId, autoPrint, onA
 
   const formatDate = (date: Date | null) => {
     if (!date) return "";
-    return new Date(date).toLocaleString("en-SA", {
+    return new Date(date).toLocaleString("en-GB", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",

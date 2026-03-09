@@ -9,7 +9,8 @@ const PASS = "Dr&4f1guk@jID,W)d?tg";
 const SSH_KEY_PATH = resolve(homedir(), ".ssh", "id_ed25519_trying");
 const APP_DIR = "/opt/trying";
 const DOMAIN = "tryingpos.com";
-const DB_URL = process.env.DATABASE_URL || "postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require";
+const DB_URL = process.env.DATABASE_URL;
+// if (!DB_URL) throw new Error("DATABASE_URL environment variable is required");
 
 const archivePath = resolve("C:\\Users\\msaz1\\Downloads\\trying-deploy.tar.gz");
 const deployScript = resolve("C:\\Users\\msaz1\\Downloads\\trying-recovry-main\\trying-recovry-main\\deploy.sh");
@@ -27,6 +28,21 @@ function exec(conn, cmd) {
       stream.on("close", (code) => resolve({ stdout, stderr, code }));
     });
   });
+}
+
+function fetchRemoteEnv(conn) {
+    return new Promise((resolve, reject) => {
+        conn.exec("cat /opt/trying/.env", (err, stream) => {
+            if (err) return reject(err);
+            let stdout = "";
+            stream.on("data", (d) => { stdout += d.toString(); });
+            stream.on("close", (code) => {
+                if (code !== 0) return resolve(null);
+                const match = stdout.match(/DATABASE_URL=(.+)/);
+                resolve(match ? match[1].trim() : null);
+            });
+        });
+    });
 }
 
 function uploadFile(conn, localPath, remotePath) {
@@ -101,6 +117,17 @@ async function main() {
   
   console.log("Connected!\n");
 
+  let dbUrl = DB_URL;
+  if (!dbUrl) {
+    console.log("[Setup] Fetching DATABASE_URL from server...");
+    dbUrl = await fetchRemoteEnv(conn);
+    if (!dbUrl) {
+      console.error("Failed to fetch DATABASE_URL from server .env");
+      throw new Error("DATABASE_URL unavailable");
+    }
+    console.log("[Setup] DATABASE_URL found.");
+  }
+
   // Step 1: Upload archive
   console.log("[1/5] Uploading project archive...");
   await uploadFile(conn, archivePath, "/tmp/trying-deploy.tar.gz");
@@ -119,7 +146,8 @@ async function main() {
 
   // Step 4: Run deploy script
   console.log("\n[5/5] Running deployment...\n");
-  const result = await exec(conn, "chmod +x /tmp/deploy.sh && bash /tmp/deploy.sh 2>&1");
+  const deployCmd = `chmod +x /tmp/deploy.sh && export DATABASE_URL="${dbUrl}" && bash /tmp/deploy.sh 2>&1`;
+  const result = await exec(conn, deployCmd);
   
   if (result.code !== 0) {
     console.error(`\nDeployment script exited with code ${result.code}`);

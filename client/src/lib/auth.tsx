@@ -29,7 +29,7 @@ interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<AuthUser>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => void;
 }
@@ -101,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     validateSession();
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string): Promise<AuthUser> => {
     setIsLoading(true);
     try {
       queryClient.clear();
@@ -110,6 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("auth_user", JSON.stringify(data.user));
       setUser(data.user);
+      return data.user;
     } finally {
       setIsLoading(false);
     }

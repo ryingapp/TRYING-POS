@@ -1,13 +1,22 @@
 module.exports = {
   apps: [{
     name: "trying",
-    script: "dist/index.cjs",
+    script: "npx",
+    args: "tsx server/index.ts",
     cwd: "/opt/trying",
     env: {
       NODE_ENV: "production",
-      DATABASE_URL: "postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require",
-      JWT_SECRET: "tR4y1nG_s3cR3t_k3y_2024_pr0d_v1_xK9mN2pL",
-      CORS_ORIGIN: "https://tryingpos.com"
-    }
+      PORT: 5000,
+    },
+    env_file: "/opt/trying/.env",
+    instances: 1,
+    exec_mode: "fork",
+    max_memory_restart: "512M",
+    autorestart: true,
+    watch: false,
+    log_date_format: "YYYY-MM-DD HH:mm:ss",
+    error_file: "/var/log/trying-error.log",
+    out_file: "/var/log/trying-out.log",
+    merge_logs: true,
   }]
 };

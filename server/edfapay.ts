@@ -274,7 +274,15 @@ export async function initiateSale(params: {
     formData.append("recurring_init", "Y");
     formData.append("req_token", "Y");
   }
+  formData.append("auth", "N");
   formData.append("hash", hash);
+
+  // Debug logging - capture exact request data
+  const formDataObj: Record<string, string> = {};
+  formData.forEach((value, key) => {
+    formDataObj[key] = key === 'hash' ? value.substring(0, 10) + '...' : value;
+  });
+  console.log('[EdfaPay] initiateSale request data:', JSON.stringify(formDataObj));
 
   const url = `${EDFAPAY_BASE_URL}/payment/initiate`;
   
@@ -287,6 +295,7 @@ export async function initiateSale(params: {
   });
 
   const body = await res.text();
+  console.log('[EdfaPay] initiateSale raw response:', body.substring(0, 1000));
   let parsed: any;
   try {
     parsed = JSON.parse(body);
@@ -296,7 +305,9 @@ export async function initiateSale(params: {
   }
 
   if (parsed.result === "ERROR") {
-    throw new Error(`EdfaPay API error (${parsed.error_code}): ${parsed.error_message}`);
+    // Include specific field validation errors if available
+    const fieldErrors = parsed.errors?.map((e: any) => e.error_message).join('; ') || '';
+    throw new Error(`EdfaPay API error (${parsed.error_code}): ${parsed.error_message}${fieldErrors ? ' [' + fieldErrors + ']' : ''}`);
   }
 
   return parsed as EdfaPayInitiateResponse;
@@ -434,6 +445,7 @@ export async function recurringPayment(params: {
 
   const formData = new URLSearchParams();
   formData.append("action", "SALE");
+  formData.append("auth", "N");
   formData.append("edfa_merchant_id", params.merchantId);
   formData.append("order_id", params.orderId);
   formData.append("order_amount", params.amount);
@@ -670,6 +682,7 @@ export async function applePaySale(params: {
 
   const formData = new URLSearchParams();
   formData.append("action", "SALE");
+  formData.append("auth", "N");
   formData.append("edfa_merchant_id", params.merchantId);
   formData.append("order_id", params.orderId);
   formData.append("order_amount", params.amount);

@@ -572,6 +572,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
     customerPhone: "",
     customerEmail: "",
     partySize: 2,
+    guestCount: 2,
     reservationDate: format(new Date(), "yyyy-MM-dd"),
     reservationTime: "19:00",
     duration: 90,
@@ -685,6 +686,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
       customerName: "",
       customerPhone: "",
       customerEmail: "",
+      partySize: 2,
       guestCount: 2,
       reservationDate: format(new Date(), "yyyy-MM-dd"),
       reservationTime: "19:00",
@@ -757,7 +759,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
             <div className="flex items-center gap-3 text-xs text-muted-foreground">
               <span>{language === "ar" ? `المدة: ${restaurant?.reservationDuration ?? 90} دقيقة` : `Duration: ${restaurant?.reservationDuration ?? 90} min`}</span>
               <span>·</span>
-              <span>{language === "ar" ? `الرسوم: ${restaurant?.reservationDepositAmount ?? "20.00"} ريال` : `Fee: ${restaurant?.reservationDepositAmount ?? "20.00"} SAR`}</span>
+              <span>{language === "ar" ? `الرسوم: ${restaurant?.reservationDepositAmount ?? "20.00"} ر.س` : `Fee: ${restaurant?.reservationDepositAmount ?? "20.00"} SAR`}</span>
               <ChevronDown className={`h-4 w-4 transition-transform ${settingsOpen ? "rotate-180" : ""}`} />
             </div>
           </div>
@@ -777,7 +779,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
                 />
               </div>
               <div className="space-y-2">
-                <Label>{language === "ar" ? "رسوم الحجز (ريال)" : "Booking Fee (SAR)"}</Label>
+                <Label>{language === "ar" ? "رسوم الحجز (ر.س)" : "Booking Fee (SAR)"}</Label>
                 <Input
                   type="number"
                   min={0}
@@ -942,7 +944,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
                     {language === "ar" ? "رسوم الحجز" : "Booking Fee"}
                   </span>
                   <span className="text-lg font-bold text-amber-900 dark:text-amber-100">
-                    20.00 {language === "ar" ? "ريال" : "SAR"}
+                    20.00 {language === "ar" ? "ر.س" : "SAR"}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1089,7 +1091,7 @@ function ReservationsTab({ language, branchId }: { language: string; branchId: s
                           <div className="flex flex-col gap-1">
                             {getDepositBadge(reservation)}
                             <span className="text-xs text-muted-foreground">
-                              {reservation.depositAmount || "20.00"} {language === "ar" ? "ريال" : "SAR"}
+                              {reservation.depositAmount || "20.00"} {language === "ar" ? "ر.س" : "SAR"}
                             </span>
                           </div>
                         </TableCell>
@@ -1564,6 +1566,8 @@ export default function TablesPage() {
 
   const { data: tables, isLoading: tablesLoading } = useQuery<TableType[]>({
     queryKey: [`/api/tables${branchParam}`],
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 
   const tableStats = {

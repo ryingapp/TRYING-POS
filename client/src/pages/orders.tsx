@@ -306,6 +306,8 @@ export default function OrdersPage() {
       const res = await apiRequest("GET", url);
       return res.json();
     },
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 
   const { data: tables } = useQuery<Table[]>({
@@ -791,6 +793,65 @@ export default function OrdersPage() {
                         <RotateCcw className="h-4 w-4 me-2 text-orange-500" />
                         {language === "ar" ? "استرجاع" : "Refund"}
                       </Button>
+                    )}
+
+                    {/* Expandable Items for POS Orders */}
+                    {((order as any).items?.length > 0) && cardSize !== "compact" && (
+                      <div className="mt-3 border-t pt-2">
+                        <button
+                          onClick={() => toggleDeliveryExpand(order.id)} // Reusing the toggle function
+                          className="flex items-center gap-1 text-sm text-primary hover:underline w-full justify-between"
+                        >
+                          <span className="flex items-center gap-1">
+                            {expandedDeliveryOrders.has(order.id) ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                            {t("items")} ({(order as any).items.length})
+                          </span>
+                        </button>
+                        
+                        {expandedDeliveryOrders.has(order.id) && (
+                          <div className="mt-2 bg-muted/30 rounded-md p-2 space-y-2">
+                            {(order as any).items.map((item: any, idx: number) => (
+                              <div key={idx} className="text-sm border-b border-border/50 last:border-0 pb-2 last:pb-0">
+                                <div className="flex justify-between items-start">
+                                  <div className="font-medium">
+                                    <span className="text-primary me-1">{item.quantity}x</span>
+                                    {language === "ar" ? item.menuItem?.nameAr || item.itemName : item.menuItem?.nameEn || item.itemName}
+                                  </div>
+                                  <div className="font-mono text-xs">
+                                    {parseFloat(item.totalPrice).toFixed(2)}
+                                  </div>
+                                </div>
+                                
+                                {/* Variants */}
+                                {item.selectedVariant && (
+                                  <div className="text-xs text-primary mt-0.5 ps-4 font-medium">
+                                    {language === "ar" ? `الحجم: ${item.selectedVariant.nameAr || ''}` : `Size: ${item.selectedVariant.nameEn || ''}`}
+                                  </div>
+                                )}
+
+                                {/* Customizations */}
+                                {item.selectedCustomizations && item.selectedCustomizations.length > 0 && (
+                                  <div className="mt-0.5 ps-4">
+                                    {item.selectedCustomizations.map((c: any, i: number) => (
+                                      <div key={i} className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                        <div className="w-1 h-1 rounded-full bg-muted-foreground" />
+                                        {language === "ar" ? c.nameAr || '' : c.nameEn || ''}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                
+                                {/* Notes */}
+                                {item.notes && (
+                                  <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5 ps-4 italic">
+                                    {language === "ar" ? `ملاحظة: ${item.notes}` : `Note: ${item.notes}`}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </CardContent>
                 </Card>

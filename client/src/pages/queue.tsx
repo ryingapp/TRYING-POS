@@ -80,11 +80,15 @@ export default function QueuePage() {
   // Fetch queue entries
   const { data: queueEntries = [], isLoading } = useQuery<QueueEntry[]>({
     queryKey: [`/api/queue${branchParam}`],
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 
   // Fetch queue stats
   const { data: stats } = useQuery<QueueStats>({
     queryKey: [`/api/queue/stats${branchParam}`],
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 
   // Add to queue mutation

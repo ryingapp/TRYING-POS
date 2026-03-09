@@ -20,15 +20,15 @@ export const validatePhoneNumber = (phone: string): { valid: boolean; error?: st
     return { valid: false, error: "Phone number must contain only digits" };
   }
 
-  // Check exact length (exactly 10 digits for Saudi format)
-  if (cleaned.length !== 10) {
-    return { valid: false, error: "Phone number must be exactly 10 digits (e.g., 0501234567)" };
+  // Check length (allow 9-15 digits for international support, though Saudi is 10)
+  if (cleaned.length < 9 || cleaned.length > 15) {
+    return { valid: false, error: "Phone number must be between 9 and 15 digits" };
   }
 
-  // Check if starts with 05 (Saudi Arabia standard)
-  if (!cleaned.startsWith("05")) {
-    return { valid: false, error: "Phone number must start with 05 (Saudi Arabia format)" };
-  }
+  // Relaxed prefix check (warn for non-05 but allow if valid length)
+  // if (!cleaned.startsWith("05") && cleaned.length === 10) {
+  //   // Optional: strict Saudi format check can be re-enabled if needed
+  // }
 
   return { valid: true };
 };
@@ -69,10 +69,10 @@ export const validatePrice = (price: string | number): { valid: boolean; error?:
     return { valid: false, error: "Price cannot be negative" };
   }
 
-  // Check decimal places
+  // Check decimal places (Allow up to 3 for precision, but prefer 2)
   const decimals = numPrice.toString().split(".")[1];
-  if (decimals && decimals.length > 2) {
-    return { valid: false, error: "Price can have maximum 2 decimal places" };
+  if (decimals && decimals.length > 5) {
+    return { valid: false, error: "Price can have maximum 5 decimal places precision" };
   }
 
   return { valid: true };
@@ -108,16 +108,25 @@ export const validateQuantity = (quantity: string | number): { valid: boolean; e
  */
 export const normalizeMobilePhone = (phone: string): string => {
   if (!phone) return "";
-  
-  // Remove spaces, dashes, and special characters
-  const cleaned = phone.replace(/[\s\-\(\)]/g, "");
-  
-  // If it's a valid format, return it
-  if (/^\d+$/.test(cleaned) && cleaned.length >= 10) {
-    return cleaned;
+
+  // Keep digits only
+  let digits = phone.replace(/\D/g, "");
+
+  // Convert Saudi country-code forms to local 05xxxxxxxx
+  if (digits.startsWith("00966") && digits.length === 14) {
+    digits = `0${digits.slice(5)}`;
+  } else if (digits.startsWith("966") && digits.length === 12) {
+    digits = `0${digits.slice(3)}`;
+  } else if (digits.startsWith("5") && digits.length === 9) {
+    digits = `0${digits}`;
   }
-  
-  return phone; // Return original if can't normalize
+
+  // Return normalized local format if valid length
+  if (/^\d+$/.test(digits) && digits.length === 10) {
+    return digits;
+  }
+
+  return digits || phone;
 };
 
 /**

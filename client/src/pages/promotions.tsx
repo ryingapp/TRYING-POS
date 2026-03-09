@@ -414,7 +414,7 @@ export default function PromotionsPage() {
                         <TableCell>
                           {promo.discountType === "percentage"
                             ? `${promo.discountValue}%`
-                            : `${promo.discountValue} ${language === "ar" ? "ريال" : "SAR"}`}
+                            : `${promo.discountValue} ${language === "ar" ? "ر.س" : "SAR"}`}
                         </TableCell>
                         <TableCell>
                           {promo.startDate} - {promo.endDate}
@@ -595,7 +595,7 @@ export default function PromotionsPage() {
                         <TableCell>
                           {coupon.discountType === "percentage"
                             ? `${coupon.discountValue}%`
-                            : `${coupon.discountValue} ${language === "ar" ? "ريال" : "SAR"}`}
+                            : `${coupon.discountValue} ${language === "ar" ? "ر.س" : "SAR"}`}
                         </TableCell>
                         <TableCell>
                           {coupon.usageCount} / {coupon.usageLimit || "∞"}

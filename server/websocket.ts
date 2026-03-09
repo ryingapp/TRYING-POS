@@ -2,7 +2,14 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HTTPServer } from "http";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-key";
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    console.warn("⚠️ JWT_SECRET not set in environment, using fallback");
+    return "fallback-secret-key";
+  }
+  return secret;
+}
 
 interface AuthenticatedWebSocket extends WebSocket {
   userId?: string;
@@ -21,7 +28,7 @@ export class WebSocketManager {
   private clients: Map<string, Set<AuthenticatedWebSocket>> = new Map();
 
   initialize(server: HTTPServer) {
-    this.wss = new WebSocketServer({ 
+    this.wss = new WebSocketServer({
       server,
       path: "/ws",
     });
@@ -34,6 +41,10 @@ export class WebSocketManager {
       // Authenticate using token from query params
       const url = new URL(req.url || "", `http://${req.headers.host}`);
       const token = url.searchParams.get("token");
+      const branchIdFromQuery = url.searchParams.get("branch");
+      
+      // Handle "undefined", "null", "all", or empty string as null (means receive all branch events)
+      const parsedBranchId = branchIdFromQuery && branchIdFromQuery !== "undefined" && branchIdFromQuery !== "null" && branchIdFromQuery !== "all" ? branchIdFromQuery : null;
 
       if (!token) {
         console.log("WebSocket auth failed: no token");
@@ -42,19 +53,23 @@ export class WebSocketManager {
       }
 
       try {
-        const decoded = jwt.verify(token, JWT_SECRET) as { 
-          userId: string; 
+        const jwtSecret = getJwtSecret();
+        const decoded = jwt.verify(token, jwtSecret) as {
+          userId: string;
           restaurantId: string;
           branchId?: string;
           role?: string;
         };
-        
+
         ws.userId = decoded.userId;
         ws.restaurantId = decoded.restaurantId;
-        ws.branchId = decoded.branchId;
+        // Use branchId from query params if valid, otherwise from token
+        ws.branchId = parsedBranchId || decoded.branchId;
         ws.role = decoded.role;
 
-        console.log(`WebSocket authenticated: user=${ws.userId}, restaurant=${ws.restaurantId}`);
+        console.log(
+          `WebSocket authenticated: user=${ws.userId}, restaurant=${ws.restaurantId}, branch=${ws.branchId}`,
+        );
 
         // Add to clients map
         if (!this.clients.has(ws.restaurantId)) {
@@ -63,10 +78,12 @@ export class WebSocketManager {
         this.clients.get(ws.restaurantId)!.add(ws);
 
         // Send welcome message
-        ws.send(JSON.stringify({
-          type: "connected",
-          payload: { userId: ws.userId, restaurantId: ws.restaurantId }
-        }));
+        ws.send(
+          JSON.stringify({
+            type: "connected",
+            payload: { userId: ws.userId, restaurantId: ws.restaurantId },
+          }),
+        );
 
         // Handle incoming messages
         ws.on("message", (data) => {
@@ -92,9 +109,8 @@ export class WebSocketManager {
         ws.on("error", (err) => {
           console.error("WebSocket error:", err);
         });
-
-      } catch (err) {
-        console.log("WebSocket auth failed: invalid token");
+      } catch (err: any) {
+        console.log(`WebSocket auth failed: ${err.message || err}`);
         ws.close(4001, "Invalid token");
       }
     });
@@ -104,7 +120,7 @@ export class WebSocketManager {
 
   private handleMessage(ws: AuthenticatedWebSocket, message: WebSocketMessage) {
     console.log("WebSocket message received:", message.type);
-    
+
     // Handle ping/pong for keepalive
     if (message.type === "ping") {
       ws.send(JSON.stringify({ type: "pong" }));
@@ -126,11 +142,18 @@ export class WebSocketManager {
       }
     });
 
-    console.log(`Broadcast to restaurant ${restaurantId}: ${message.type} (${sent} clients)`);
+    console.log(
+      `Broadcast to restaurant ${restaurantId}: ${message.type} (${sent} clients)`,
+    );
   }
 
   // Broadcast to all clients of a specific branch
-  broadcastToBranch(restaurantId: string, branchId: string, message: WebSocketMessage) {
+  // Also includes clients without a branch set (they receive all branch messages)
+  broadcastToBranch(
+    restaurantId: string,
+    branchId: string,
+    message: WebSocketMessage,
+  ) {
     const clients = this.clients.get(restaurantId);
     if (!clients) return;
 
@@ -138,28 +161,40 @@ export class WebSocketManager {
     let sent = 0;
 
     clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN && client.branchId === branchId) {
+      if (
+        client.readyState === WebSocket.OPEN &&
+        // Send if: client has no branchId OR client's branchId matches target
+        (!client.branchId || client.branchId === branchId)
+      ) {
         client.send(payload);
         sent++;
       }
     });
 
-    console.log(`Broadcast to branch ${branchId}: ${message.type} (${sent} clients)`);
+    console.log(
+      `Broadcast to branch ${branchId}: ${message.type} (${sent} clients)`,
+    );
   }
 
   // Send notification about new order
   notifyNewOrder(restaurantId: string, branchId: string, order: any) {
     this.broadcastToBranch(restaurantId, branchId, {
       type: "new_order",
-      payload: order
+      payload: order,
     });
   }
 
   // Send notification about order status change
-  notifyOrderStatusChange(restaurantId: string, branchId: string, orderId: string, status: string, order?: any) {
+  notifyOrderStatusChange(
+    restaurantId: string,
+    branchId: string,
+    orderId: string,
+    status: string,
+    order?: any,
+  ) {
     this.broadcastToBranch(restaurantId, branchId, {
       type: "order_status_changed",
-      payload: { orderId, status, order }
+      payload: { orderId, status, order },
     });
   }
 
@@ -167,7 +202,15 @@ export class WebSocketManager {
   notifyOrderUpdate(restaurantId: string, branchId: string, order: any) {
     this.broadcastToBranch(restaurantId, branchId, {
       type: "order_updated",
-      payload: order
+      payload: order,
+    });
+  }
+
+  // Generic data_changed broadcast — tells all clients to refetch specific data
+  notifyDataChanged(restaurantId: string, entity: string, action?: string) {
+    this.broadcastToRestaurant(restaurantId, {
+      type: "data_changed",
+      payload: { entity, action: action || "updated" },
     });
   }
 

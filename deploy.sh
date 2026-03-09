@@ -6,7 +6,7 @@ echo "  TRYING - Production Deployment Script"
 echo "========================================="
 
 APP_DIR="/opt/trying"
-DB_URL="${DATABASE_URL:-postgresql://neondb_owner:npg_41htWOCBVKyn@ep-blue-bush-aibgf4j4-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require}"
+DB_URL="${DATABASE_URL:?DATABASE_URL environment variable is required}"
 DOMAIN="tryingpos.com"
 PORT=5000
 
@@ -33,9 +33,16 @@ echo "[4/8] Setting up application..."
 mkdir -p $APP_DIR
 cd $APP_DIR
 
+# IMPORTANT: Read JWT_SECRET BEFORE extracting archive (archive may overwrite .env)
+EXISTING_JWT=""
+if [ -f $APP_DIR/.env ]; then
+  EXISTING_JWT=$(grep '^JWT_SECRET=' $APP_DIR/.env | cut -d'=' -f2-)
+  echo "  Preserved existing JWT_SECRET"
+fi
+
 # Extract the uploaded archive
 if [ -f /tmp/trying-deploy.tar.gz ]; then
-    tar -xzf /tmp/trying-deploy.tar.gz -C $APP_DIR
+    tar -xzf /tmp/trying-deploy.tar.gz --exclude='.env' -C $APP_DIR
     rm /tmp/trying-deploy.tar.gz
 fi
 
@@ -43,14 +50,15 @@ fi
 echo "[5/8] Installing dependencies..."
 npm install --production=false
 
+# 5.5. Build client for production
+echo "[5.5/8] Building client..."
+npx vite build 2>&1 || echo "  ⚠️ Client build failed, using existing build"
+
 # 6. Create environment file (preserve JWT_SECRET across deploys)
 echo "[6/8] Creating environment file..."
-EXISTING_JWT=""
-if [ -f $APP_DIR/.env ]; then
-  EXISTING_JWT=$(grep '^JWT_SECRET=' $APP_DIR/.env | cut -d'=' -f2-)
-fi
 if [ -z "$EXISTING_JWT" ]; then
   EXISTING_JWT=$(openssl rand -base64 32)
+  echo "  Generated new JWT_SECRET"
 fi
 
 cat > $APP_DIR/.env << EOF
@@ -60,6 +68,15 @@ PORT=$PORT
 JWT_SECRET=$EXISTING_JWT
 CORS_ORIGIN=https://$DOMAIN
 EOF
+
+# Load environment variables for migration scripts
+export DATABASE_URL=$DB_URL
+
+# Run schema migration fixes if present
+if [ -f $APP_DIR/add-cashier-name.cjs ]; then
+    echo "[6.5/8] Running schema fixes (cashier_name)..."
+    node $APP_DIR/add-cashier-name.cjs || echo "  ⚠️ Schema fix failed/skipped"
+fi
 
 # 7. Setup PM2 ecosystem
 echo "[7/8] Setting up PM2..."

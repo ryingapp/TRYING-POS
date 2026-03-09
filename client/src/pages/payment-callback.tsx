@@ -2,9 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
-import { Badge } from "@/components/ui/badge";
-import { CheckCircle2, XCircle, Loader2, Globe, Printer, Download, Receipt, MapPin, ShoppingBag } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, Globe, Printer, Download, ShoppingBag } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { apiRequest } from "@/lib/queryClient";
 import { QRCodeSVG } from "qrcode.react";
@@ -14,6 +12,8 @@ interface InvoiceItem {
   quantity: number;
   unitPrice: string;
   totalPrice: string;
+  notes?: string | null;
+  itemName?: string | null;
   menuItem?: { nameEn: string; nameAr: string; price: string };
 }
 
@@ -29,12 +29,14 @@ interface PublicInvoice {
   deliveryFee: string | null;
   total: string;
   customerName: string | null;
+  customerPhone: string | null;
   paymentMethod: string | null;
   isPaid: boolean | null;
   qrCodeData: string | null;
   zatcaStatus: string | null;
   uuid: string | null;
   invoiceCounter: number | null;
+  invoiceHash: string | null;
   createdAt: string | null;
   issuedAt: string | null;
   order: {
@@ -42,6 +44,7 @@ interface PublicInvoice {
     orderNumber: string;
     orderType: string;
     total: string;
+    notes?: string | null;
     items: InvoiceItem[];
   };
   restaurant: {
@@ -51,18 +54,74 @@ interface PublicInvoice {
     commercialRegistration: string | null;
     address: string | null;
     phone: string | null;
+    logo: string | null;
     city: string | null;
-    logoUrl: string | null;
+    streetName: string | null;
+    district: string | null;
   } | null;
 }
 
+// Thermal receipt CSS for print window — identical to cashier invoice
+const receiptCSS = `
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Courier New', 'Segoe UI', Tahoma, monospace;
+    padding: 4px;
+    background: #fff;
+    color: #000;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .receipt {
+    max-width: 80mm;
+    margin: 0 auto;
+    padding: 8px 4px;
+  }
+  .receipt-center { text-align: center; }
+  .receipt-logo { max-width: 80px; max-height: 80px; margin: 0 auto 6px; display: block; object-fit: contain; }
+  .receipt-name { font-size: 16px; font-weight: bold; margin-bottom: 2px; }
+  .receipt-info { font-size: 11px; color: #333; margin-bottom: 1px; }
+  .receipt-divider { border: none; border-top: 1px dashed #000; margin: 8px 0; }
+  .receipt-thick-divider { border: none; border-top: 2px solid #000; margin: 8px 0; }
+  .receipt-title { font-size: 14px; font-weight: bold; text-align: center; margin: 4px 0; }
+  .receipt-order-box {
+    border: 2px solid #000;
+    text-align: center;
+    padding: 6px;
+    margin: 8px 0;
+    font-size: 22px;
+    font-weight: bold;
+  }
+  .receipt-row { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 12px; }
+  .receipt-row-bold { display: flex; justify-content: space-between; margin-bottom: 2px; font-size: 13px; font-weight: bold; }
+  .receipt-label { flex-shrink: 0; }
+  .receipt-value { flex-shrink: 0; text-align: end; }
+  .receipt-item { margin-bottom: 6px; }
+  .receipt-item-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .receipt-item-name { font-weight: bold; flex: 1; }
+  .receipt-item-price { flex-shrink: 0; font-weight: bold; }
+  .receipt-item-detail { font-size: 10px; color: #555; margin-top: 1px; }
+  .receipt-total-section { margin-top: 4px; }
+  .receipt-grand-total { display: flex; justify-content: space-between; font-size: 16px; font-weight: bold; padding: 4px 0; }
+  .receipt-payment-box { border: 1px solid #000; padding: 4px 8px; margin: 6px 0; }
+  .receipt-qr { text-align: center; margin-top: 8px; }
+  .receipt-qr svg { margin: 0 auto; }
+  .receipt-footer { text-align: center; font-size: 10px; color: #555; margin-top: 8px; }
+  .receipt-badge { display: inline-block; padding: 2px 8px; border: 1px solid #000; font-size: 11px; font-weight: bold; margin: 4px 0; }
+  @media print {
+    body { padding: 0; }
+    .no-print { display: none !important; }
+  }
+`;
+
 export default function PaymentCallbackPage() {
-  const { orderId } = useParams<{ orderId: string }>();
+  const { orderId } = useParams<{ orderId: string }>(); // This could be sessionId or orderId
   const [, setLocation] = useLocation();
   const { language, setLanguage, direction, t, getLocalizedName } = useLanguage();
   const [status, setStatus] = useState<"loading" | "success" | "failed">("loading");
   const [message, setMessage] = useState("");
   const [invoice, setInvoice] = useState<PublicInvoice | null>(null);
+  const [realOrderId, setRealOrderId] = useState<string | null>(null);
   const printRef = useRef<HTMLDivElement>(null);
 
   const toggleLanguage = () => {
@@ -76,53 +135,71 @@ export default function PaymentCallbackPage() {
       completed = true;
       try {
         const urlParams = new URLSearchParams(window.location.search);
-        
-        // EdfaPay callback params
+
         const transId = urlParams.get("trans_id") || urlParams.get("order_id");
         const paymentStatus = urlParams.get("status");
-        const gwayId = urlParams.get("trans_id");
-
-        // Also support legacy ?id= param or ?status=paid for direct redirects
+        const gwayId = urlParams.get("trans_id") || urlParams.get("gway_id");
         const legacyId = urlParams.get("id");
+        const isSession = urlParams.get("session") === "true";
 
-        if (!transId && !legacyId && paymentStatus !== "paid") {
-          setStatus("failed");
-          setMessage(language === "ar" ? "معرّف الدفع غير موجود" : "Payment ID not found");
-          return;
-        }
-
-        // Check if EdfaPay reported a failed/declined payment
         if (paymentStatus === "fail" || paymentStatus === "failed" || paymentStatus === "declined") {
           setStatus("failed");
           setMessage(language === "ar" ? "لم يتم إكمال الدفع" : "Payment was not completed");
           return;
         }
 
-        const completeRes = await apiRequest("POST", "/api/payments/complete", {
-          orderId,
-          transId: transId || legacyId,
-          gwayId: gwayId || transId || legacyId,
-        });
-
-        if (completeRes.ok) {
-          setStatus("success");
-          setMessage(language === "ar" ? "تم الدفع بنجاح" : "Payment successful");
-
-          // Fetch invoice
-          try {
-            const invoiceRes = await fetch(`/api/public/orders/${orderId}/invoice`);
-            if (invoiceRes.ok) {
-              const invoiceData = await invoiceRes.json();
-              setInvoice(invoiceData);
-            }
-          } catch {
-            // Invoice display is optional — don't block success
+        // Try to complete payment with retries (webhook may arrive with slight delay)
+        const maxRetries = 3;
+        let lastError = "";
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, 2000 * attempt));
           }
-        } else {
-          const errorData = await completeRes.json();
-          setStatus("failed");
-          setMessage(errorData.error || (language === "ar" ? "فشل الدفع" : "Payment failed"));
+          
+          // Build request body - use sessionId for new flow, orderId for legacy
+          const body: any = {
+            transId: transId || legacyId || undefined,
+            gwayId: gwayId || transId || legacyId || undefined,
+          };
+          if (isSession) {
+            body.sessionId = orderId; // The URL param is actually a sessionId
+          } else {
+            body.orderId = orderId;
+          }
+
+          const completeRes = await apiRequest("POST", "/api/payments/complete", body);
+
+          if (completeRes.ok) {
+            const orderData = await completeRes.json();
+            setStatus("success");
+            setMessage(language === "ar" ? "تم الدفع بنجاح" : "Payment successful");
+            
+            // Store real orderId for invoice display
+            const actualOrderId = orderData?.id || orderId;
+            setRealOrderId(actualOrderId);
+
+            try {
+              const invoiceRes = await fetch(`/api/public/orders/${actualOrderId}/invoice`);
+              if (invoiceRes.ok) {
+                const invoiceData = await invoiceRes.json();
+                setInvoice(invoiceData);
+              }
+            } catch {
+              // Invoice display is optional
+            }
+            return;
+          } else {
+            const errorData = await completeRes.json().catch(() => ({}));
+            lastError = errorData.error || "";
+            console.log(`Payment verification attempt ${attempt + 1}/${maxRetries} failed: ${lastError}`);
+            if (lastError && !lastError.includes("unknown") && !lastError.includes("expired")) {
+              break;
+            }
+          }
         }
+        
+        setStatus("failed");
+        setMessage(lastError || (language === "ar" ? "فشل الدفع" : "Payment failed"));
       } catch (err) {
         console.error("Payment verification error:", err);
         setStatus("failed");
@@ -135,76 +212,67 @@ export default function PaymentCallbackPage() {
 
   const formatDate = (date: string | null) => {
     if (!date) return "";
-    return new Date(date).toLocaleString(language === "ar" ? "ar-SA" : "en-SA", {
+    return new Date(date).toLocaleString("en-GB", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
     });
+  };
+
+  const getPaymentMethodLabel = (method: string | null) => {
+    if (!method) return "";
+    if (method === "edfapay_online") return "دفع إلكتروني / Online Payment";
+    if (method === "split") return t("splitPayment");
+    if (method === "stc_pay") return t("stcPay");
+    if (method === "hungerstation") return "Hungerstation";
+    if (method === "jahez") return "Jahez";
+    return t(method);
+  };
+
+  const getItemCount = () => {
+    return invoice?.order?.items?.reduce((sum: number, item: any) => sum + (item.quantity || 1), 0) || 0;
+  };
+
+  const getRestaurantAddress = () => {
+    const r = invoice?.restaurant;
+    if (!r) return "";
+    const parts = [];
+    if (r.city) parts.push(r.city);
+    if (r.streetName) parts.push(r.streetName);
+    if (r.district) parts.push(r.district);
+    if (parts.length === 0 && r.address) return r.address;
+    return parts.join(" - ");
   };
 
   const handlePrint = () => {
     if (!printRef.current) return;
     const printWindow = window.open("", "_blank");
     if (!printWindow) return;
+
     const content = printRef.current.innerHTML;
     printWindow.document.write(`
       <html>
         <head>
-          <title>${language === "ar" ? "فاتورة ضريبية" : "Tax Invoice"} - ${invoice?.invoiceNumber || ""}</title>
-          <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-              font-family: 'Segoe UI', Tahoma, sans-serif;
-              padding: 16px;
-              direction: ${direction};
-              background: #fff;
-              color: #000;
-            }
-            .invoice-print { max-width: 80mm; margin: 0 auto; }
-            .text-center { text-align: center; }
-            .text-lg { font-size: 18px; }
-            .text-sm { font-size: 13px; }
-            .text-xs { font-size: 11px; }
-            .font-bold { font-weight: bold; }
-            .font-medium { font-weight: 500; }
-            .font-semibold { font-weight: 600; }
-            .text-gray-500 { color: #888; }
-            .text-gray-600 { color: #666; }
-            .text-green-600 { color: #16a34a; }
-            .mb-4 { margin-bottom: 16px; }
-            .mb-3 { margin-bottom: 12px; }
-            .mb-2 { margin-bottom: 8px; }
-            .mb-1 { margin-bottom: 4px; }
-            .mt-4 { margin-top: 16px; }
-            .mt-1 { margin-top: 4px; }
-            .my-3 { margin-top: 12px; margin-bottom: 12px; }
-            .mx-auto { margin-left: auto; margin-right: auto; }
-            .space-y-1 > * + * { margin-top: 4px; }
-            .space-y-2 > * + * { margin-top: 8px; }
-            .flex { display: flex; }
-            .justify-between { justify-content: space-between; }
-            .items-center { align-items: center; }
-            .gap-1 { gap: 4px; }
-            .gap-2 { gap: 8px; }
-            .p-4 { padding: 16px; }
-            .separator { border: none; border-top: 1px dashed #ccc; margin: 12px 0; }
-            .paid-badge {
-              display: inline-flex; align-items: center; gap: 4px;
-              padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: 600;
-              background: #dcfce7; color: #16a34a; border: 1px solid #bbf7d0;
-            }
-            [data-orientation="horizontal"] { border: none; border-top: 1px dashed #ccc; margin: 12px 0; height: 0; }
-            @media print { body { padding: 0; } .no-print { display: none !important; } }
-          </style>
+          <title>فاتورة ضريبية - ${invoice?.invoiceNumber || ""}</title>
+          <style>${receiptCSS}</style>
         </head>
-        <body><div class="invoice-print">${content}</div></body>
+        <body>
+          <div class="receipt" dir="rtl">
+            ${content}
+          </div>
+        </body>
       </html>
     `);
     printWindow.document.close();
     setTimeout(() => printWindow.print(), 250);
   };
+
+  const restaurantAddress = invoice ? getRestaurantAddress() : "";
+  const itemCount = getItemCount();
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30 flex items-center justify-center p-4" dir={direction}>
@@ -289,7 +357,7 @@ export default function PaymentCallbackPage() {
               </CardContent>
             </Card>
 
-            {/* Invoice Display */}
+            {/* Invoice Display - Matches Cashier Thermal Receipt */}
             {invoice && (
               <Card>
                 <CardContent className="p-0">
@@ -305,152 +373,263 @@ export default function PaymentCallbackPage() {
                     </Button>
                   </div>
 
-                  {/* Printable Invoice Content */}
-                  <div ref={printRef} className="bg-white text-black p-5" dir={direction}>
-                    {/* Restaurant Header */}
-                    <div className="text-center mb-4">
-                      {invoice.restaurant?.logoUrl && (
-                        <img 
-                          src={invoice.restaurant.logoUrl} 
-                          alt="" 
-                          className="h-12 w-12 rounded-full mx-auto mb-2 object-cover"
+                  {/* ===== RECEIPT CONTENT (Same as cashier thermal receipt) ===== */}
+                  <div ref={printRef} className="bg-white text-black rounded-lg border font-mono text-xs leading-relaxed" dir="rtl" style={{ maxWidth: '80mm', margin: '0 auto', padding: '12px 8px' }}>
+
+                    {/* === HEADER: Logo + Restaurant Info === */}
+                    <div style={{ textAlign: 'center', marginBottom: '8px' }}>
+                      {invoice.restaurant?.logo && (
+                        <img
+                          src={invoice.restaurant.logo}
+                          alt="logo"
+                          crossOrigin="anonymous"
+                          referrerPolicy="no-referrer"
+                          style={{ maxWidth: '80px', maxHeight: '80px', margin: '0 auto 6px', display: 'block', objectFit: 'contain', borderRadius: '8px' }}
                         />
                       )}
-                      <h2 className="text-lg font-bold">
-                        {getLocalizedName(invoice.restaurant?.nameEn, invoice.restaurant?.nameAr)}
-                      </h2>
+                      {/* Bilingual restaurant name */}
+                      {invoice.restaurant?.nameAr && (
+                        <div style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '1px' }}>
+                          {invoice.restaurant.nameAr}
+                        </div>
+                      )}
+                      {invoice.restaurant?.nameEn && (
+                        <div style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '4px', color: '#333' }}>
+                          {invoice.restaurant.nameEn}
+                        </div>
+                      )}
+                      {restaurantAddress && (
+                        <div style={{ fontSize: '10px', color: '#333' }}>
+                          {restaurantAddress}
+                        </div>
+                      )}
                       {invoice.restaurant?.vatNumber && (
-                        <p className="text-xs text-gray-600">
-                          {language === "ar" ? "الرقم الضريبي" : "VAT No"}: {invoice.restaurant.vatNumber}
-                        </p>
+                        <div style={{ fontSize: '10px', color: '#333', marginTop: '2px' }}>
+                          الرقم الضريبي / VAT: {invoice.restaurant.vatNumber}
+                        </div>
                       )}
                       {invoice.restaurant?.commercialRegistration && (
-                        <p className="text-xs text-gray-600">
-                          {language === "ar" ? "السجل التجاري" : "CR"}: {invoice.restaurant.commercialRegistration}
-                        </p>
-                      )}
-                      {invoice.restaurant?.address && (
-                        <p className="text-xs text-gray-500">{invoice.restaurant.address}</p>
+                        <div style={{ fontSize: '10px', color: '#333', marginTop: '1px' }}>
+                          س.ت / CR: {invoice.restaurant.commercialRegistration}
+                        </div>
                       )}
                       {invoice.restaurant?.phone && (
-                        <p className="text-xs text-gray-500">{invoice.restaurant.phone}</p>
+                        <div style={{ fontSize: '10px', color: '#333', marginTop: '1px' }}>
+                          خدمة العملاء / Customer Service: {invoice.restaurant.phone}
+                        </div>
                       )}
                     </div>
 
-                    {/* Invoice Title + Paid Badge */}
-                    <div className="text-center mb-3">
-                      <h3 className="font-semibold text-sm mb-1">
-                        {language === "ar" ? "فاتورة ضريبية مبسطة" : "Simplified Tax Invoice"}
-                      </h3>
-                      <span className="paid-badge inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold bg-green-100 text-green-700 border border-green-300">
-                        &#10003; {language === "ar" ? "مدفوعة" : "PAID"}
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+                    {/* === SIMPLIFIED TAX INVOICE Title === */}
+                    <div style={{ textAlign: 'center', margin: '4px 0' }}>
+                      <div style={{ fontSize: '14px', fontWeight: 'bold' }}>فاتورة ضريبية مبسطة</div>
+                      <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#333' }}>Simplified Tax Invoice</div>
+                    </div>
+
+                    {/* === PAID Badge === */}
+                    <div style={{ textAlign: 'center', margin: '6px 0' }}>
+                      <span style={{ display: 'inline-block', padding: '3px 12px', border: '2px solid #16a34a', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', color: '#16a34a' }}>
+                        ✓ مدفوعة / PAID
                       </span>
                     </div>
 
-                    <Separator className="my-3" />
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
 
-                    {/* Invoice Meta */}
-                    <div className="text-sm space-y-1">
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">{language === "ar" ? "رقم الفاتورة" : "Invoice #"}:</span>
-                        <span className="font-medium">{invoice.invoiceNumber}</span>
+                    {/* === ORDER NUMBER (Big box) === */}
+                    <div style={{ border: '2px solid #000', textAlign: 'center', padding: '6px', margin: '8px 0' }}>
+                      <div style={{ fontSize: '13px', fontWeight: 'bold' }}>الطلب #{invoice.order?.orderNumber || invoice.invoiceCounter || '—'}</div>
+                    </div>
+
+                    {/* === Invoice Details - bilingual separate lines === */}
+                    <div style={{ marginBottom: '6px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '11px' }}>
+                        <span>رقم الفاتورة</span>
+                        <span style={{ fontWeight: 'bold' }}>{invoice.invoiceNumber}</span>
                       </div>
-                      {invoice.invoiceCounter && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">{language === "ar" ? "عداد الفاتورة (ICV)" : "Invoice Counter (ICV)"}:</span>
-                          <span className="font-medium">{invoice.invoiceCounter}</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">{language === "ar" ? "رقم الطلب" : "Order #"}:</span>
-                        <span className="font-medium">{invoice.order?.orderNumber || "-"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">{language === "ar" ? "التاريخ" : "Date"}:</span>
+                      <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Invoice #</div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '11px' }}>
+                        <span>التاريخ</span>
                         <span>{formatDate(invoice.issuedAt || invoice.createdAt)}</span>
                       </div>
-                      {invoice.customerName && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">{language === "ar" ? "العميل" : "Customer"}:</span>
-                          <span>{invoice.customerName}</span>
-                        </div>
-                      )}
-                      {invoice.paymentMethod && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">{language === "ar" ? "طريقة الدفع" : "Payment"}:</span>
-                          <span>{invoice.paymentMethod === "edfapay_online" ? (language === "ar" ? "دفع إلكتروني" : "Online") : invoice.paymentMethod}</span>
-                        </div>
-                      )}
+                      <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px' }}>Date</div>
                     </div>
 
-                    <Separator className="my-3" />
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
 
-                    {/* Order Items */}
-                    <div className="space-y-2">
-                      <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                        {language === "ar" ? "تفاصيل الطلب" : "Order Details"}
-                      </h4>
-                      {invoice.order?.items?.map((item) => (
-                        <div key={item.id} className="text-sm">
-                          <div className="flex justify-between">
-                            <span>
-                              {getLocalizedName(item.menuItem?.nameEn, item.menuItem?.nameAr)} × {item.quantity}
-                            </span>
-                            <span className="font-medium">{item.totalPrice} {language === "ar" ? "ريال" : "SAR"}</span>
+                    {/* === Order Type + Customer Info - bilingual === */}
+                    <div style={{ marginBottom: '6px' }}>
+                      {invoice.order?.orderType && (
+                        <>
+                          <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '1px' }}>
+                            {invoice.order.orderType === 'delivery' ? 'توصيل' : invoice.order.orderType === 'dine_in' ? 'داخل المطعم' : 'استلام'}
                           </div>
+                          <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>
+                            {invoice.order.orderType === 'delivery' ? 'Delivery' : invoice.order.orderType === 'dine_in' ? 'Dine In' : 'Pickup'}
+                          </div>
+                        </>
+                      )}
+
+                      {/* Customer Info */}
+                      {invoice.customerName && (
+                        <div style={{ fontSize: '11px', marginBottom: '2px' }}>
+                          العميل : {invoice.customerName}
                         </div>
-                      ))}
+                      )}
+                      {invoice.customerPhone && (
+                        <div style={{ fontSize: '11px', marginBottom: '2px' }}>
+                          الجوال : {invoice.customerPhone}
+                        </div>
+                      )}
                     </div>
 
-                    <Separator className="my-3" />
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '2px solid #000', margin: '8px 0' }} />
 
-                    {/* Totals */}
-                    <div className="text-sm space-y-1">
-                      <div className="flex justify-between">
-                        <span>{language === "ar" ? "المجموع الفرعي" : "Subtotal"}:</span>
-                        <span>{invoice.subtotal} {language === "ar" ? "ريال" : "SAR"}</span>
+                    {/* === ITEMS TABLE === */}
+                    <div style={{ marginBottom: '4px' }}>
+                      {/* Header row - Arabic line then English line */}
+                      <div style={{ fontSize: '10px', fontWeight: 'bold', marginBottom: '2px', display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ width: '30px' }}>الكمية</span>
+                        <span style={{ flex: 1, textAlign: 'center' }}>المنتج</span>
+                        <span style={{ width: '65px', textAlign: 'end' }}>السعر</span>
                       </div>
+                      <div style={{ fontSize: '9px', fontWeight: 'bold', marginBottom: '6px', borderBottom: '1px solid #000', paddingBottom: '4px', display: 'flex', justifyContent: 'space-between', color: '#555' }}>
+                        <span style={{ width: '30px' }}>Qty</span>
+                        <span style={{ flex: 1, textAlign: 'center' }}>Item</span>
+                        <span style={{ width: '65px', textAlign: 'end' }}>Price</span>
+                      </div>
+
+                      {/* Item rows - show both Arabic and English names */}
+                      {invoice.order?.items?.map((item: any) => {
+                        const nameEn = item.menuItem?.nameEn || item.itemName || '';
+                        const nameAr = item.menuItem?.nameAr || '';
+
+                        return (
+                          <div key={item.id} style={{ marginBottom: '8px' }}>
+                            {/* Main line: qty + English name + price */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                              <span style={{ width: '30px' }}>{item.quantity}</span>
+                              <span style={{ flex: 1, fontWeight: 'bold', paddingInline: '4px' }}>
+                                {nameEn}
+                              </span>
+                              <span style={{ width: '65px', textAlign: 'end', fontWeight: 'bold' }}>
+                                {item.totalPrice} ر.س
+                              </span>
+                            </div>
+                            {/* Arabic name */}
+                            {nameAr && nameAr !== nameEn && (
+                              <div style={{ fontSize: '10px', color: '#333', paddingInlineStart: '34px', marginTop: '1px' }}>
+                                {nameAr}
+                              </div>
+                            )}
+                            {/* Notes / customizations */}
+                            {item.notes && (
+                              <div style={{ fontSize: '9px', color: '#555', paddingInlineStart: '34px', marginTop: '1px' }}>
+                                {item.notes}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '2px solid #000', margin: '8px 0' }} />
+
+                    {/* === TOTALS - bilingual separate lines === */}
+                    <div style={{ marginBottom: '4px' }}>
+                      {/* Subtotal */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+                        <span>المجموع الفرعي</span>
+                        <span>{invoice.subtotal} ر.س</span>
+                      </div>
+                      <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Subtotal</div>
+
                       {parseFloat(invoice.discount || "0") > 0 && (
-                        <div className="flex justify-between text-green-600">
-                          <span>{language === "ar" ? "الخصم" : "Discount"}:</span>
-                          <span>-{invoice.discount} {language === "ar" ? "ريال" : "SAR"}</span>
-                        </div>
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px', color: '#16a34a' }}>
+                            <span>الخصم</span>
+                            <span>-{invoice.discount} ر.س</span>
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#16a34a', marginBottom: '4px' }}>Discount</div>
+                        </>
                       )}
+
                       {parseFloat(invoice.deliveryFee || "0") > 0 && (
-                        <div className="flex justify-between">
-                          <span>{language === "ar" ? "رسوم التوصيل" : "Delivery Fee"}:</span>
-                          <span>{invoice.deliveryFee} {language === "ar" ? "ريال" : "SAR"}</span>
-                        </div>
+                        <>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+                            <span>رسوم التوصيل</span>
+                            <span>{invoice.deliveryFee} ر.س</span>
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>Delivery Fee</div>
+                        </>
                       )}
-                      <div className="flex justify-between">
-                        <span>{language === "ar" ? "ضريبة القيمة المضافة" : "VAT"} ({invoice.taxRate || "15"}%):</span>
-                        <span>{invoice.taxAmount} {language === "ar" ? "ريال" : "SAR"}</span>
+
+                      {/* VAT */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px' }}>
+                        <span>VAT {invoice.taxRate || '15'}%({invoice.taxRate || '15'}.0%)</span>
+                        <span>{invoice.taxAmount} ر.س</span>
                       </div>
-                      <Separator className="my-2" />
-                      <div className="flex justify-between font-bold text-base">
-                        <span>{language === "ar" ? "الإجمالي" : "Total"}:</span>
-                        <span>{invoice.total} {language === "ar" ? "ريال" : "SAR"}</span>
+                      <div style={{ fontSize: '10px', color: '#555', marginBottom: '4px' }}>({invoice.taxRate || '15'}.0%) ضريبة القيمة المضافة {invoice.taxRate || '15'}%</div>
+
+                      <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '6px 0' }} />
+
+                      {/* Grand Total */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '15px', fontWeight: 'bold', marginBottom: '1px' }}>
+                        <span>الإجمالي</span>
+                        <span>{invoice.total} ر.س</span>
                       </div>
+                      <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#555', marginBottom: '2px' }}>Total</div>
                     </div>
 
-                    {/* QR Code */}
-                    {invoice.qrCodeData && (
-                      <div className="text-center mt-4">
-                        <QRCodeSVG
-                          value={invoice.qrCodeData}
-                          size={120}
-                          level="M"
-                          className="mx-auto"
-                        />
-                        <p className="text-xs text-gray-500 mt-1">
-                          {language === "ar" ? "متوافق مع زاتكا" : "ZATCA Compliant"}
-                        </p>
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+                    {/* === PAYMENT METHOD - bilingual === */}
+                    {invoice.paymentMethod && (
+                      <div style={{ margin: '6px 0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1px', fontSize: '12px', fontWeight: 'bold' }}>
+                          <span>الدفع - {getPaymentMethodLabel(invoice.paymentMethod)}</span>
+                          <span>{invoice.total} ر.س</span>
+                        </div>
                       </div>
                     )}
 
-                    {/* Footer */}
-                    <div className="text-center mt-4 text-xs text-gray-500">
-                      <p>شكراً لزيارتكم - Thank you for your visit</p>
+                    {/* === Product Count === */}
+                    <div style={{ fontSize: '11px', margin: '6px 0' }}>
+                      عدد المنتجات {itemCount}
+                    </div>
+
+                    {/* === Divider === */}
+                    <hr style={{ border: 'none', borderTop: '1px dashed #000', margin: '8px 0' }} />
+
+                    {/* === QR Code === */}
+                    {invoice.qrCodeData && (
+                      <div style={{ textAlign: 'center', margin: '8px 0' }}>
+                        <QRCodeSVG
+                          value={invoice.qrCodeData}
+                          size={130}
+                          level="M"
+                          style={{ margin: '0 auto' }}
+                        />
+                      </div>
+                    )}
+
+                    {/* === Footer === */}
+                    <div style={{ textAlign: 'center', fontSize: '10px', color: '#555', marginTop: '8px' }}>
+                      <p>شكراً لزيارتكم</p>
+                      <p style={{ marginTop: '1px' }}>Thank you for your visit</p>
+                    </div>
+
+                    {/* === Powered by Trying === */}
+                    <div style={{ textAlign: 'center', fontSize: '9px', color: '#999', marginTop: '10px', borderTop: '1px dotted #ccc', paddingTop: '6px' }}>
+                      <span>Powered by </span>
+                      <span style={{ fontWeight: 'bold', color: '#666' }}>Trying</span>
                     </div>
                   </div>
                 </CardContent>

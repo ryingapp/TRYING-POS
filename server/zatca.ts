@@ -18,6 +18,19 @@
  * - ZATCA Developer Portal Manual v3
  */
 import crypto from 'crypto';
+import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+// Import zatca-xml-js for CSR generation
+let ZatcaEGS: any = null;
+try {
+  const zatcaLib = require('zatca-xml-js');
+  ZatcaEGS = zatcaLib.EGS || zatcaLib.default?.EGS || zatcaLib;
+} catch (e) {
+  console.log('[ZATCA] zatca-xml-js not available, using custom CSR generation');
+}
 
 // ===========================================
 // Types & Interfaces
@@ -654,6 +667,15 @@ function derPrintableString(value: string): Buffer {
   return derWrap(0x13, Buffer.from(value, 'ascii'));
 }
 
+function derBmpString(value: string): Buffer {
+  // BMPString is UCS-2 Big Endian (each character is 2 bytes)
+  const buf = Buffer.alloc(value.length * 2);
+  for (let i = 0; i < value.length; i++) {
+    buf.writeUInt16BE(value.charCodeAt(i), i * 2);
+  }
+  return derWrap(0x1e, buf);
+}
+
 function derBitString(content: Buffer): Buffer {
   return derWrap(0x03, Buffer.concat([Buffer.from([0x00]), content]));
 }
@@ -698,15 +720,14 @@ function buildRdn(oidStr: string, value: string, useUtf8 = true): Buffer {
 
 
 // ===========================================
-// CSR Generation — ECDSA secp256k1
+// CSR Generation — Using OpenSSL directly (matches zatca-xml-js SDK exactly)
 // ===========================================
+
 /**
- * Generate a real PKCS#10 CSR for ZATCA device registration.
- * Includes ZATCA-required extensions:
- * - Certificate Template Name (OID 1.3.6.1.4.1.311.20.2)
- * - Subject Alternative Name (OID 2.5.29.17) with directoryName
+ * Generate a PKCS#10 CSR for ZATCA device registration.
+ * Uses OpenSSL directly which is the same method used by zatca-xml-js SDK.
  */
-export function generateZatcaCsr(data: {
+export async function generateZatcaCsr(data: {
   commonName: string;
   organizationIdentifier: string;
   organizationUnit: string;
@@ -715,88 +736,154 @@ export function generateZatcaCsr(data: {
   invoiceType: string;
   location: string;
   industry: string;
-}): { csr: string; privateKey: string } {
-  // 1. Generate ECDSA secp256k1 key pair
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', {
-    namedCurve: 'secp256k1',
-    publicKeyEncoding: { type: 'spki', format: 'der' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  });
+  environment?: string; // 'sandbox' | 'simulation' | 'production'
+}): Promise<{ csr: string; privateKey: string }> {
+  const env = data.environment || 'sandbox';
+  const isProduction = (env === 'production');
+  console.log('[ZATCA CSR] Environment:', env, '| Production:', isProduction);
+  
+  // Try using zatca-xml-js library first (most reliable)
+  if (ZatcaEGS && ZatcaEGS.EGS) {
+    try {
+      console.log('[ZATCA CSR] Using zatca-xml-js EGS library');
+      const vatNumber = data.organizationIdentifier.replace('VATSA-', '');
+      const uuid = crypto.randomUUID();
+      
+      // Sanitize fields to ASCII only
+      const sanitize = (s: string) => s.replace(/[^\x00-\x7F]/g, '').trim() || 'Default';
+      
+      const egsInfo = {
+        uuid: uuid,
+        custom_id: `EGS1-${vatNumber}-00001`,
+        model: '1.0',
+        VAT_name: sanitize(data.organizationName) || 'Restaurant',
+        VAT_number: vatNumber,
+        branch_name: sanitize(data.organizationUnit) || 'Branch',
+        branch_industry: sanitize(data.industry) || 'Food',
+        location: {
+          building: '1',
+          street: sanitize(data.location) || 'Riyadh',
+          city: sanitize(data.location) || 'Riyadh',
+        }
+      };
+      
+      const egs = new ZatcaEGS.EGS(egsInfo);
+      await egs.generateNewKeysAndCSR(isProduction, 'TryingPOS');
+      
+      const egsData = egs.get();
+      console.log('[ZATCA CSR] Generated with zatca-xml-js, CSR length:', egsData.csr?.length);
+      
+      if (!egsData.csr || !egsData.private_key) {
+        throw new Error('EGS library failed to generate CSR');
+      }
+      
+      return { csr: egsData.csr, privateKey: egsData.private_key };
+    } catch (egsError: any) {
+      console.error('[ZATCA CSR] zatca-xml-js failed:', egsError.message);
+      // Fall through to OpenSSL
+    }
+  }
+  
+  // Fallback to OpenSSL
+  console.log('[ZATCA CSR] Using OpenSSL fallback');
+  
+  // Extract VAT number
+  const vatNumber = data.organizationIdentifier.replace('VATSA-', '');
+  const uuid = crypto.randomUUID();
+  // Match optima_zatca serial format: 1-{key}uy|2-{solution_name}nt|3-{key}pu
+  const keyPart = uuid.replace(/-/g, '').substring(0, 12);
+  const egsSerial = `1-${keyPart}uy|2-TryingPOSnt|3-${keyPart}pu`;
+  // Template names per optima_zatca: sandbox=TESTZATCA, simulation=PREZATCA, production=ZATCA
+  const templateName = env === 'production' ? 'ZATCA-Code-Signing' : (env === 'simulation' ? 'PREZATCA-Code-Signing' : 'TESTZATCA-Code-Signing');
+  
+  // Sanitize fields
+  const sanitize = (s: string) => s.replace(/[^\x00-\x7F]/g, '').trim() || 'Default';
+  const orgUnit = sanitize(data.organizationUnit) || 'Branch';
+  const orgName = sanitize(data.organizationName) || 'Restaurant';
+  const location = sanitize(data.location) || 'Riyadh';
+  const industry = sanitize(data.industry) || 'Food';
+  
+  console.log('[ZATCA CSR] EGS Serial:', egsSerial.substring(0, 40));
+  console.log('[ZATCA CSR] Template:', templateName);
+  
+  // Create OpenSSL config matching optima_zatca (keys.py) exactly
+  const configContent = `oid_section = OIDs
+[ OIDs ]
+certificateTemplateName = 1.3.6.1.4.1.311.20.2
 
-  // 2. Build Subject DN
-  // serialNumber must use a UUID in the 3rd segment as required by ZATCA
-  const serialNumberValue = `1-TST|2-TST|3-${crypto.randomUUID()}`;
-  const subject = derSequence(
-    buildRdn(OID.countryName, data.countryCode, false),
-    buildRdn(OID.organization, data.organizationName),
-    buildRdn(OID.organizationalUnit, data.organizationUnit),
-    buildRdn(OID.commonName, data.commonName),
-    buildRdn(OID.serialNumber, serialNumberValue, false),
-    buildRdn(OID.organizationIdentifier, data.organizationIdentifier),
-  );
+[req]
+default_bits = 2048
+emailAddress = test@zatca.com
+req_extensions = v3_req
+x509_extensions = v3_ca
+prompt = no
+default_md = sha256
+req_extensions = req_ext
+distinguished_name = dn
+utf8 = yes
 
-  // 3. SubjectPublicKeyInfo (already DER-encoded from crypto)
-  const spki = Buffer.from(publicKey);
+[ dn ]
+C = SA
+OU = ${orgUnit}
+O = ${orgName}
+CN = ${data.commonName}
 
-  // 4. Build Extensions
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment
 
-  // Certificate Template Name (UTF8String — required by ZATCA sandbox)
-  const templateExt = derSequence(
-    derOid(OID.certificateTemplateName),
-    derOctetString(derUtf8String('ZATCA-Code-Signing')),
-  );
+[req_ext]
+certificateTemplateName = ASN1:PRINTABLESTRING:${templateName}
+subjectAltName = dirName:alt_names
 
-  // Subject Alternative Name (directoryName with ZATCA fields)
-  const sanDirName = derSequence(
-    buildRdn(OID.surname, serialNumberValue, false),
-    buildRdn(OID.userId, data.commonName, false),
-    buildRdn(OID.title, data.invoiceType, false),
-    buildRdn(OID.registeredAddress, data.location),
-    buildRdn(OID.businessCategory, data.industry),
-  );
-  const sanGeneralName = derContextConstructed(4, sanDirName);
-  const sanValue = derSequence(sanGeneralName);
-  const sanExt = derSequence(
-    derOid(OID.subjectAltName),
-    derBoolean(true),
-    derOctetString(sanValue),
-  );
+[alt_names]
+SN = ${egsSerial}
+UID = ${vatNumber}
+title = ${data.invoiceType || '1100'}
+registeredAddress = ${location}
+businessCategory = ${industry}
+`;
 
-  const extensions = derSequence(templateExt, sanExt);
-  const extensionRequest = derSequence(
-    derOid(OID.extensionRequest),
-    derSet(extensions),
-  );
-  const attributes = derContextConstructed(0, extensionRequest);
-
-  // 5. Build CertificationRequestInfo
-  const certRequestInfo = derSequence(
-    derInteger(0),
-    subject,
-    spki,
-    attributes,
-  );
-
-  // 6. Sign CertificationRequestInfo
-  const signer = crypto.createSign('SHA256');
-  signer.update(certRequestInfo);
-  const signature = signer.sign({ key: privateKey, dsaEncoding: 'der' });
-
-  // 7. Signature algorithm identifier
-  const signatureAlgorithm = derSequence(derOid(OID.ecdsaWithSHA256));
-
-  // 8. Wrap in CertificationRequest SEQUENCE
-  const csr = derSequence(certRequestInfo, signatureAlgorithm, derBitString(signature));
-
-  // 9. Encode as PEM
-  const csrBase64 = csr.toString('base64');
-  const csrPem = [
-    '-----BEGIN CERTIFICATE REQUEST-----',
-    ...csrBase64.match(/.{1,64}/g)!,
-    '-----END CERTIFICATE REQUEST-----',
-  ].join('\n');
-
-  return { csr: csrPem, privateKey };
+  const configFile = `/tmp/zatca_csr_${uuid}.cnf`;
+  const keyFile = `/tmp/zatca_key_${uuid}.pem`;
+  const csrFile = `/tmp/zatca_csr_${uuid}.pem`;
+  
+  try {
+    // Write config
+    fs.writeFileSync(configFile, configContent);
+    
+    // Generate key
+    execSync(`openssl ecparam -name secp256k1 -genkey -noout -out ${keyFile}`, { encoding: 'utf-8' });
+    
+    // Generate CSR with v3_req extensions (matching optima_zatca)
+    execSync(`openssl req -new -sha256 -key ${keyFile} -extensions v3_req -config ${configFile} -out ${csrFile}`, { encoding: 'utf-8' });
+    
+    // Read results
+    const privateKey = fs.readFileSync(keyFile, 'utf-8');
+    const csr = fs.readFileSync(csrFile, 'utf-8');
+    
+    // Cleanup
+    try {
+      fs.unlinkSync(configFile);
+      fs.unlinkSync(keyFile);
+      fs.unlinkSync(csrFile);
+    } catch {}
+    
+    console.log('[ZATCA CSR] Generated with OpenSSL, CSR length:', csr.length);
+    
+    return { csr, privateKey };
+  } catch (error: any) {
+    console.error('[ZATCA CSR] OpenSSL failed:', error.message);
+    
+    // Cleanup on error
+    try {
+      fs.unlinkSync(configFile);
+      fs.unlinkSync(keyFile);
+      fs.unlinkSync(csrFile);
+    } catch {}
+    
+    throw new Error(`CSR generation failed: ${error.message}`);
+  }
 }
 
 
@@ -1137,14 +1224,14 @@ export async function getComplianceCsid(
   tokenType: string;
   dispositionMessage: string;
 }> {
-  // Strip PEM headers - ZATCA expects raw base64 CSR content
-  const csrClean = csr
-    .replace(/-----BEGIN CERTIFICATE REQUEST-----/g, '')
-    .replace(/-----END CERTIFICATE REQUEST-----/g, '')
-    .replace(/\s/g, '');
-
+  // Encode the FULL PEM CSR content as base64 (matching optima_zatca approach)
+  // optima_zatca does: base64.b64encode(csr_pem_content.encode()).decode()
+  // This means the entire PEM file (with BEGIN/END headers) is base64-encoded
+  const csrClean = Buffer.from(csr.trim()).toString('base64');
+  
   console.log(`[ZATCA] Sending compliance request to ${baseUrl}/compliance`);
-  console.log(`[ZATCA] OTP: ${otp}, CSR length: ${csrClean.length}`);
+  console.log(`[ZATCA] OTP: ${otp}, CSR base64 length: ${csrClean.length}`);
+  console.log(`[ZATCA] CSR first 60 chars: ${csrClean.substring(0, 60)}...`);
 
   const response = await fetch(`${baseUrl}/compliance`, {
     method: 'POST',
@@ -1160,16 +1247,34 @@ export async function getComplianceCsid(
   if (!response.ok) {
     const errorText = await response.text();
     console.error(`[ZATCA] Compliance failed: ${response.status}`, errorText);
-    console.error(`[ZATCA] Response headers:`, JSON.stringify(Object.fromEntries(response.headers.entries())));
-    console.error(`[ZATCA] CSR sent (first 200 chars):`, csrClean.substring(0, 200));
     
-    // Try to parse error details
+    // Try to parse error details and extract meaningful message
+    let errorMessage = `ZATCA Compliance CSID failed: ${response.status}`;
+    let errorDetails = '';
     try {
       const errorJson = JSON.parse(errorText);
       console.error(`[ZATCA] Error details:`, JSON.stringify(errorJson, null, 2));
+      if (errorJson.message) errorDetails = errorJson.message;
+      if (errorJson.errors && Array.isArray(errorJson.errors)) {
+        errorDetails = errorJson.errors.map((e: any) => e.message || e.code || JSON.stringify(e)).join('; ');
+      }
+      if (errorJson.validationResults?.errorMessages?.length > 0) {
+        errorDetails = errorJson.validationResults.errorMessages.map((e: any) => e.message).join('; ');
+      }
     } catch {}
     
-    throw new Error(`ZATCA Compliance CSID failed: ${response.status} - ${errorText}`);
+    // Common error handling
+    if (response.status === 400) {
+      if (errorText.includes('OTP') || errorText.includes('expired')) {
+        errorMessage = 'OTP code expired or invalid. Please generate a new OTP from ZATCA portal.';
+      } else if (errorText.includes('CSR') || errorText.includes('certificate')) {
+        errorMessage = 'CSR format is invalid. Please check your VAT number and try again.';
+      } else {
+        errorMessage = `ZATCA rejected the request: ${errorDetails || errorText || 'Invalid Request'}`;
+      }
+    }
+    
+    throw new Error(errorMessage);
   }
   return response.json();
 }
@@ -1210,11 +1315,19 @@ export async function submitComplianceInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
+  const responseText = await response.text();
+  let body: any = null;
+  try { body = JSON.parse(responseText); } catch { /* non-JSON response */ }
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`ZATCA Compliance check failed: ${response.status} - ${errorText}`);
+    // ZATCA returns structured validationResults on 400 — preserve them
+    if (response.status === 400 && body?.validationResults) {
+      return body;
+    }
+    const msg = body?.message || body?.error || (body ? JSON.stringify(body) : responseText.slice(0, 200)) || `HTTP ${response.status}`;
+    throw new Error(`ZATCA Compliance check failed: ${response.status} - ${msg}`);
   }
-  return response.json();
+  if (!body) throw new Error('ZATCA Compliance check: empty or invalid JSON response');
+  return body;
 }
 
 /**
@@ -1244,11 +1357,15 @@ export async function getProductionCsid(
     },
     body: JSON.stringify({ compliance_request_id: complianceRequestId }),
   });
+  const responseText = await response.text();
+  let body: any = null;
+  try { body = JSON.parse(responseText); } catch { /* non-JSON response */ }
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`ZATCA Production CSID failed: ${response.status} - ${errorText}`);
+    const msg = body?.message || body?.error || (body ? JSON.stringify(body) : responseText.slice(0, 200)) || `HTTP ${response.status}`;
+    throw new Error(`ZATCA Production CSID failed: ${response.status} - ${msg}`);
   }
-  return response.json();
+  if (!body) throw new Error('ZATCA Production CSID: empty or invalid JSON response');
+  return body;
 }
 
 /**
@@ -1287,11 +1404,19 @@ export async function reportInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
+  const responseText = await response.text();
+  let body: any = null;
+  try { body = JSON.parse(responseText); } catch { /* non-JSON response */ }
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`ZATCA Reporting failed: ${response.status} - ${errorText}`);
+    // ZATCA returns structured validationResults on 400 — preserve them
+    if (response.status === 400 && body?.validationResults) {
+      return body;
+    }
+    const msg = body?.message || body?.error || (body ? JSON.stringify(body) : responseText.slice(0, 200)) || `HTTP ${response.status}`;
+    throw new Error(`ZATCA Reporting failed: ${response.status} - ${msg}`);
   }
-  return response.json();
+  if (!body) throw new Error('ZATCA Reporting: empty or invalid JSON response');
+  return body;
 }
 
 /**
@@ -1331,11 +1456,18 @@ export async function clearInvoice(
       invoice: Buffer.from(signedXml, 'utf8').toString('base64'),
     }),
   });
+  const responseText = await response.text();
+  let body: any = null;
+  try { body = JSON.parse(responseText); } catch { /* non-JSON response */ }
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`ZATCA Clearance failed: ${response.status} - ${errorText}`);
+    if (response.status === 400 && body?.validationResults) {
+      return body;
+    }
+    const msg = body?.message || body?.error || (body ? JSON.stringify(body) : responseText.slice(0, 200)) || `HTTP ${response.status}`;
+    throw new Error(`ZATCA Clearance failed: ${response.status} - ${msg}`);
   }
-  return response.json();
+  if (!body) throw new Error('ZATCA Clearance: empty or invalid JSON response');
+  return body;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Search, Edit2, Trash2, Users, Phone, Mail, ShoppingBag } from "lucide-react";
+import { Plus, Search, Edit2, Trash2, Users, Phone, Mail, ShoppingBag, Award, Crown } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -197,14 +197,13 @@ export default function CustomersPage() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">{language === "ar" ? "متوسط الإنفاق" : "Avg. Spend"}</CardTitle>
-            <span className="text-sm text-muted-foreground">{language === "ar" ? "ر.س" : "SAR"}</span>
+            <CardTitle className="text-sm font-medium">{language === "ar" ? "برنامج الولاء" : "Loyalty Program"}</CardTitle>
+            <Crown className="h-4 w-4 text-warning" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {customers && customers.length > 0
-                ? (customers.reduce((sum, c) => sum + parseFloat(c.totalSpent || "0"), 0) / customers.length).toFixed(2)
-                : "0.00"}
+               {customers?.reduce((sum, c) => sum + (c.pointsBalance || 0), 0) || 0}
+               <span className="text-xs font-normal text-muted-foreground ml-1">{language === "ar" ? "نقطة" : "pts"}</span>
             </div>
           </CardContent>
         </Card>
@@ -237,6 +236,8 @@ export default function CustomersPage() {
                 <TableHead className="hidden md:table-cell">{language === "ar" ? "البريد" : "Email"}</TableHead>
                 <TableHead className="text-center">{language === "ar" ? "الطلبات" : "Orders"}</TableHead>
                 <TableHead>{language === "ar" ? "إجمالي الإنفاق" : "Total Spent"}</TableHead>
+                <TableHead>{language === "ar" ? "نقاط" : "Points"}</TableHead>
+                <TableHead>{language === "ar" ? "مستوى" : "Tier"}</TableHead>
                 <TableHead className="hidden sm:table-cell">{language === "ar" ? "آخر طلب" : "Last Order"}</TableHead>
                 <TableHead className="text-center">{language === "ar" ? "الإجراءات" : "Actions"}</TableHead>
               </TableRow>
@@ -252,6 +253,27 @@ export default function CustomersPage() {
                   </TableCell>
                   <TableCell>
                     {parseFloat(customer.totalSpent || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="bg-amber-50 text-amber-600 border-amber-200">
+                      {customer.pointsBalance || 0}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {(() => {
+                        const tier = customer.loyaltyTier || 'bronze';
+                        const colorMap: Record<string, string> = {
+                            bronze: "bg-orange-100 text-orange-800 border-orange-200",
+                            silver: "bg-slate-100 text-slate-800 border-slate-200",
+                            gold: "bg-yellow-100 text-yellow-800 border-yellow-200",
+                            platinum: "bg-purple-100 text-purple-800 border-purple-200"
+                        };
+                        return (
+                            <Badge variant="outline" className={`capitalize ${colorMap[tier] || ''}`}>
+                                {tier}
+                            </Badge>
+                        );
+                    })()}
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">
                     {customer.lastOrderAt

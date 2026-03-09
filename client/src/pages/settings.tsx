@@ -2,7 +2,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Store, Receipt, Building2, Users, LayoutGrid, Plus, Trash2, Edit2, Printer, CreditCard, Upload, ExternalLink, CheckCircle2, AlertCircle, Clock, RefreshCw, ImagePlus, X, Crown, FileText, Shield, Wifi, Link2, AlertTriangle } from "lucide-react";
 import DeliverySettingsPage from "./delivery-settings";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,11 @@ const billingFormSchema = z.object({
   taxEnabled: z.boolean().optional(),
   vatNumber: z.string().optional(),
   commercialRegistration: z.string().optional(),
+  commercialRegistrationName: z.string().optional(),
+  shortAddress: z.string().optional(),
+  registrationType: z.string().optional(),
+  industry: z.string().optional(),
+  invoiceType: z.string().optional(),
   taxRate: z.string().optional(),
   ownerName: z.string().optional(),
   ownerPhone: z.string().optional(),
@@ -104,6 +109,8 @@ const billingFormSchema = z.object({
   bankAccountNumber: z.string().optional(),
   bankSwift: z.string().optional(),
   bankIban: z.string().optional(),
+  edfapayMerchantId: z.string().optional(),
+  edfapayPassword: z.string().optional(),
 });
 
 const branchFormSchema = z.object({
@@ -134,6 +141,7 @@ const userFormSchema = z.object({
   permQr: z.boolean().default(false),
   permReports: z.boolean().default(false),
   permSettings: z.boolean().default(false),
+  permTables: z.boolean().default(false),
 });
 
 const printerFormSchema = z.object({
@@ -170,6 +178,16 @@ export default function SettingsPage() {
   const isPlatformAdmin = authUser?.role === 'platform_admin';
   const isOwnerOrAdmin = authUser?.role === 'owner' || isPlatformAdmin;
   const isMainBranch = selectedBranch?.isMain === true;
+  const [activeTab, setActiveTab] = useState(() => {
+    const saved = sessionStorage.getItem("settings-tab");
+    if (saved) return saved;
+    return isMainBranch ? "general" : "printers";
+  });
+
+  // Persist active tab so it survives re-mounts
+  useEffect(() => {
+    sessionStorage.setItem("settings-tab", activeTab);
+  }, [activeTab]);
   const [branchDialogOpen, setBranchDialogOpen] = useState(false);
   const [userDialogOpen, setUserDialogOpen] = useState(false);
   const [printerDialogOpen, setPrinterDialogOpen] = useState(false);
@@ -193,6 +211,11 @@ export default function SettingsPage() {
 
   const { data: printers = [] } = useQuery<PrinterType[]>({
     queryKey: ["/api/printers"],
+  });
+
+  const { data: restaurantsList = [] } = useQuery<any[]>({
+    queryKey: ["/api/restaurants"],
+    enabled: isPlatformAdmin,
   });
 
   const generalForm = useForm<z.infer<typeof generalFormSchema>>({
@@ -240,6 +263,11 @@ export default function SettingsPage() {
       taxEnabled: restaurant?.taxEnabled !== false,
       vatNumber: restaurant?.vatNumber || "",
       commercialRegistration: restaurant?.commercialRegistration || "",
+      commercialRegistrationName: (restaurant as any)?.commercialRegistrationName || "",
+      shortAddress: (restaurant as any)?.shortAddress || "",
+      registrationType: (restaurant as any)?.registrationType || "CRN",
+      industry: (restaurant as any)?.industry || "Food",
+      invoiceType: (restaurant as any)?.invoiceType || "1100",
       taxRate: restaurant?.taxRate || "15",
       ownerName: restaurant?.ownerName || "",
       ownerPhone: restaurant?.ownerPhone || "",
@@ -291,6 +319,7 @@ export default function SettingsPage() {
       permQr: false,
       permReports: false,
       permSettings: false,
+      permTables: false,
     },
   });
 
@@ -340,10 +369,14 @@ export default function SettingsPage() {
         branchId: data.branchId && data.branchId.trim() !== "" ? data.branchId : null,
       };
       if (data.id) {
-        const { password, ...updateData } = cleanedData;
+        // Only include password if it's non-empty (for password reset)
+        const updateData = { ...cleanedData };
+        if (!updateData.password || updateData.password.trim() === "") {
+          delete updateData.password;
+        }
         return apiRequest("PUT", `/api/users/${data.id}`, updateData);
       }
-      return apiRequest("POST", "/api/users/register", cleanedData);
+      return apiRequest("POST", "/api/users", cleanedData);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/users"] });
@@ -504,8 +537,14 @@ export default function SettingsPage() {
   };
 
   const onUserSubmit = (data: z.infer<typeof userFormSchema>) => {
+    // Password required for new users
     if (!editingUser && (!data.password || data.password.length < 6)) {
       toast({ title: language === "ar" ? "كلمة المرور مطلوبة (6 أحرف على الأقل)" : "Password is required (at least 6 characters)", variant: "destructive" });
+      return;
+    }
+    // Password validation for existing users (only if provided)
+    if (editingUser && data.password && data.password.trim() !== "" && data.password.length < 6) {
+      toast({ title: language === "ar" ? "كلمة المرور يجب أن تكون 6 أحرف على الأقل" : "Password must be at least 6 characters", variant: "destructive" });
       return;
     }
     userMutation.mutate(editingUser ? { ...data, id: editingUser.id } : data);
@@ -544,6 +583,7 @@ export default function SettingsPage() {
       permQr: user.permQr ?? false,
       permReports: user.permReports ?? false,
       permSettings: user.permSettings ?? false,
+      permTables: user.permTables ?? false,
     });
     setUserDialogOpen(true);
   };
@@ -576,7 +616,7 @@ export default function SettingsPage() {
         <p className="text-muted-foreground">{t("restaurantInfo")}</p>
       </div>
 
-      <Tabs defaultValue={isMainBranch ? "general" : "printers"} className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="flex-wrap h-auto gap-1">
           {isMainBranch && (
             <>
@@ -1532,6 +1572,84 @@ export default function SettingsPage() {
                           );
                         }}
                       />
+                      <FormField
+                        control={billingForm.control}
+                        name="commercialRegistrationName"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{language === 'ar' ? 'اسم السجل التجاري' : 'Commercial Registration Name'}</FormLabel>
+                            <FormControl>
+                              <Input {...field} placeholder={language === 'ar' ? 'اسم السجل التجاري' : 'CR Name'} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      <FormField
+                        control={billingForm.control}
+                        name="shortAddress"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{language === 'ar' ? 'العنوان المختصر الوطني' : 'Short Address'}</FormLabel>
+                            <FormControl>
+                              <Input {...field} placeholder={language === 'ar' ? 'مثال: RRRD2929' : 'e.g. RRRD2929'} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={billingForm.control}
+                        name="registrationType"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{language === 'ar' ? 'نوع التسجيل' : 'Registration Type'}</FormLabel>
+                            <FormControl>
+                              <select {...field} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                                <option value="CRN">{language === 'ar' ? 'سجل تجاري (CRN)' : 'Commercial Registration (CRN)'}</option>
+                                <option value="MOM">{language === 'ar' ? 'وزارة البلديات (MOM)' : 'Ministry of Municipality (MOM)'}</option>
+                                <option value="MLS">{language === 'ar' ? 'رخصة وزارة العمل (MLS)' : 'Ministry of Labor (MLS)'}</option>
+                                <option value="700">{language === 'ar' ? '700 سبعمائة (700)' : '700 Number'}</option>
+                                <option value="SAG">{language === 'ar' ? 'وكيل سعودي (SAG)' : 'Saudi Agent (SAG)'}</option>
+                                <option value="OTH">{language === 'ar' ? 'أخرى (OTH)' : 'Other (OTH)'}</option>
+                              </select>
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={billingForm.control}
+                        name="industry"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{language === 'ar' ? 'نوع النشاط' : 'Industry / Business Category'}</FormLabel>
+                            <FormControl>
+                              <Input {...field} placeholder={language === 'ar' ? 'مثال: مطاعم' : 'e.g. Food'} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={billingForm.control}
+                        name="invoiceType"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{language === 'ar' ? 'نوع الفاتورة' : 'Invoice Type'}</FormLabel>
+                            <FormControl>
+                              <select {...field} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                                <option value="1100">{language === 'ar' ? 'قياسية + مبسطة (1100)' : 'Standard + Simplified (1100)'}</option>
+                                <option value="0100">{language === 'ar' ? 'قياسية فقط (0100)' : 'Standard Only (0100)'}</option>
+                                <option value="1000">{language === 'ar' ? 'مبسطة فقط (1000)' : 'Simplified Only (1000)'}</option>
+                              </select>
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                       <FormField
@@ -1806,21 +1924,22 @@ export default function SettingsPage() {
                           )}
                         />
                       </div>
-                      {!editingUser && (
-                        <FormField
-                          control={userForm.control}
-                          name="password"
-                          render={({ field }) => (
-                            <FormItem>
-                              <FormLabel>{t("password")} *</FormLabel>
-                              <FormControl>
-                                <Input {...field} type="password" data-testid="input-user-password" />
-                              </FormControl>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
-                      )}
+                      <FormField
+                        control={userForm.control}
+                        name="password"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>
+                              {t("password")} {!editingUser && "*"}
+                              {editingUser && <span className="text-xs text-muted-foreground mr-2">(اتركه فارغاً للإبقاء على كلمة المرور الحالية)</span>}
+                            </FormLabel>
+                            <FormControl>
+                              <Input {...field} type="password" placeholder={editingUser ? "••••••••" : ""} data-testid="input-user-password" />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
                       <div className="grid grid-cols-2 gap-4">
                         <FormField
                           control={userForm.control}
@@ -1939,6 +2058,11 @@ export default function SettingsPage() {
                               key: "permSettings", 
                               label: "permSettings",
                               desc: language === "ar" ? "الإعدادات والطابعات" : "Settings & Printers"
+                            },
+                            { 
+                              key: "permTables", 
+                              label: "permTables",
+                              desc: language === "ar" ? "الطاولات والحجوزات والانتظار" : "Tables, Reservations & Queue"
                             },
                           ].map(({ key, label, desc }) => (
                             <FormField
@@ -2521,6 +2645,9 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
   const [otp, setOtp] = useState("");
   const [csr, setCsr] = useState("");
   const [isRegistering, setIsRegistering] = useState(false);
+  const [selectedBranchId, setSelectedBranchId] = useState<string>("");
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+  const [newDeviceName, setNewDeviceName] = useState("");
 
   // Fetch ZATCA status
   const { data: zatcaStatus, refetch: refetchStatus } = useQuery({
@@ -2531,6 +2658,17 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
     },
     enabled: !!restaurantId,
     staleTime: 30000,
+  });
+
+  // Fetch devices for selected branch
+  const { data: branchDevices, refetch: refetchDevices } = useQuery({
+    queryKey: ["/api/zatca/devices", selectedBranchId],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/zatca/devices?branchId=${selectedBranchId}`);
+      return res.json();
+    },
+    enabled: !!selectedBranchId,
+    staleTime: 10000,
   });
 
   // Fetch ZATCA dashboard stats
@@ -2559,11 +2697,23 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
 
   const registerComplianceCsid = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/zatca/compliance-csid", { otp, csr });
+      const res = await apiRequest("POST", "/api/zatca/compliance-csid", {
+        otp,
+        csr,
+        branchId: selectedBranchId || undefined,
+        egsDeviceId: selectedDeviceId || undefined,
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(language === "ar" && errorData.errorAr ? errorData.errorAr : errorData.error || "Registration failed");
+      }
       return res.json();
     },
     onSuccess: (data: any) => {
       refetchStatus();
+      refetchDevices();
+      if (data.egsDeviceId) setSelectedDeviceId(data.egsDeviceId);
+      setOtp("");
       toast({
         title: language === "ar" ? "تم التسجيل بنجاح" : "Registration Successful",
         description: data.dispositionMessage || "Compliance CSID obtained",
@@ -2580,7 +2730,10 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
 
   const runComplianceCheck = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/zatca/compliance-check");
+      const res = await apiRequest("POST", "/api/zatca/compliance-check", {
+        branchId: selectedBranchId || undefined,
+        egsDeviceId: selectedDeviceId || undefined,
+      });
       return res.json();
     },
     onSuccess: (data: any) => {
@@ -2602,11 +2755,15 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
 
   const getProductionCsid = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/zatca/production-csid");
+      const res = await apiRequest("POST", "/api/zatca/production-csid", {
+        branchId: selectedBranchId || undefined,
+        egsDeviceId: selectedDeviceId || undefined,
+      });
       return res.json();
     },
     onSuccess: () => {
       refetchStatus();
+      refetchDevices();
       toast({
         title: language === "ar" ? "تم الحصول على شهادة الإنتاج" : "Production CSID Obtained",
       });
@@ -2643,335 +2800,359 @@ function ZatcaSettingsTab({ language, restaurantId }: { language: string; restau
     },
   });
 
+  const createDevice = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/zatca/devices", {
+        branchId: selectedBranchId,
+        name: newDeviceName || `كاشير ${(branchDevices?.length || 0) + 1}`,
+      });
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      refetchDevices();
+      refetchStatus();
+      setSelectedDeviceId(data.id);
+      setNewDeviceName("");
+      toast({
+        title: isAr ? "تم إضافة الجهاز" : "Device Added",
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: isAr ? "فشل إضافة الجهاز" : "Failed to add device",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteDevice = useMutation({
+    mutationFn: async (deviceId: string) => {
+      const res = await apiRequest("DELETE", `/api/zatca/devices/${deviceId}`);
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchDevices();
+      refetchStatus();
+      setSelectedDeviceId("");
+      toast({
+        title: isAr ? "تم حذف الجهاز" : "Device Deleted",
+      });
+    },
+  });
+
+  // Get selected device status for the registration steps
+  const selectedDevice = branchDevices?.find((d: any) => d.id === selectedDeviceId);
+  const deviceHasComplianceCsid = selectedDeviceId ? selectedDevice?.hasComplianceCsid : zatcaStatus?.hasComplianceCsid;
+  const deviceHasProductionCsid = selectedDeviceId ? selectedDevice?.hasProductionCsid : zatcaStatus?.hasProductionCsid;
+
   const isAr = language === "ar";
 
+  // Auto-select first branch if only one
+  useEffect(() => {
+    if (!selectedBranchId && zatcaStatus?.branches?.length === 1) {
+      setSelectedBranchId(zatcaStatus.branches[0].id);
+    }
+  }, [zatcaStatus?.branches, selectedBranchId]);
+
+  const requirementsMet = [
+    zatcaStatus?.hasVatNumber,
+    zatcaStatus?.taxEnabled,
+    zatcaStatus?.isFullyConfigured,
+    zatcaStatus?.hasProductionCsid,
+  ].filter(Boolean).length;
+
   return (
-    <div className="space-y-6">
-      {/* ZATCA Status Overview */}
+    <div className="space-y-5">
+
+      {/* ═══════ 1. Overview Bar — compact status + environment + stats ═══════ */}
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Shield className="h-5 w-5" />
-            {isAr ? "حالة الفوترة الإلكترونية (ZATCA)" : "E-Invoicing Status (ZATCA)"}
-          </CardTitle>
-          <CardDescription>
-            {isAr
-              ? "هيئة الزكاة والضريبة والجمارك - نظام فاتورة"
-              : "Zakat, Tax and Customs Authority - FATOORA System"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="p-3 rounded-lg border bg-card">
-              <p className="text-xs text-muted-foreground">{isAr ? "رقم ضريبي" : "VAT Number"}</p>
-              <p className="font-semibold text-sm mt-1">
-                {zatcaStatus?.vatNumber || (isAr ? "غير مسجل" : "Not Set")}
-              </p>
-              {zatcaStatus?.hasVatNumber ? (
-                <Badge variant="default" className="mt-1 text-[10px]">
-                  <CheckCircle2 className="h-3 w-3 me-1" />
-                  {isAr ? "مسجل" : "Registered"}
-                </Badge>
-              ) : (
-                <Badge variant="destructive" className="mt-1 text-[10px]">
-                  <AlertCircle className="h-3 w-3 me-1" />
-                  {isAr ? "مطلوب" : "Required"}
-                </Badge>
-              )}
-            </div>
-
-            <div className="p-3 rounded-lg border bg-card">
-              <p className="text-xs text-muted-foreground">{isAr ? "شهادة الامتثال" : "Compliance CSID"}</p>
-              <p className="font-semibold text-sm mt-1">
-                {zatcaStatus?.hasComplianceCsid ? (isAr ? "مثبتة" : "Installed") : (isAr ? "غير مثبتة" : "Not Set")}
-              </p>
-              <Badge variant={zatcaStatus?.hasComplianceCsid ? "default" : "outline"} className="mt-1 text-[10px]">
-                {zatcaStatus?.hasComplianceCsid ? "✓" : "—"} {isAr ? "الخطوة 1" : "Step 1"}
-              </Badge>
-            </div>
-
-            <div className="p-3 rounded-lg border bg-card">
-              <p className="text-xs text-muted-foreground">{isAr ? "شهادة الإنتاج" : "Production CSID"}</p>
-              <p className="font-semibold text-sm mt-1">
-                {zatcaStatus?.hasProductionCsid ? (isAr ? "مفعّلة" : "Active") : (isAr ? "غير مفعّلة" : "Not Active")}
-              </p>
-              <Badge variant={zatcaStatus?.hasProductionCsid ? "default" : "outline"} className="mt-1 text-[10px]">
-                {zatcaStatus?.hasProductionCsid ? "✓" : "—"} {isAr ? "الخطوة 3" : "Step 3"}
-              </Badge>
-            </div>
-
-            <div className="p-3 rounded-lg border bg-card">
-              <p className="text-xs text-muted-foreground">{isAr ? "البيئة" : "Environment"}</p>
-              <p className="font-semibold text-sm mt-1 capitalize">{zatcaStatus?.environment || "sandbox"}</p>
-              <Badge variant={zatcaStatus?.environment === "production" ? "default" : "secondary"} className="mt-1 text-[10px]">
-                {zatcaStatus?.environment === "production"
-                  ? (isAr ? "إنتاج" : "Production")
-                  : (isAr ? "تجريبي" : "Sandbox")}
-              </Badge>
-            </div>
+        <CardContent className="pt-5 space-y-4">
+          {/* Top row: VAT + Environment + Readiness */}
+          <div className="flex flex-wrap items-center gap-3">
+            {/* VAT */}
+            <Badge variant={zatcaStatus?.hasVatNumber ? "default" : "destructive"} className="text-xs px-3 py-1">
+              {zatcaStatus?.hasVatNumber
+                ? `VAT ${zatcaStatus.vatNumber}`
+                : (isAr ? "الرقم الضريبي مطلوب" : "VAT Required")}
+            </Badge>
+            {/* Environment selector — inline */}
+            <Select
+              value={zatcaStatus?.environment || "sandbox"}
+              onValueChange={(val) => updateEnvironment.mutate(val)}
+            >
+              <SelectTrigger className="w-auto h-7 text-xs gap-1 border-dashed px-2">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="sandbox">{isAr ? "تجريبي (Sandbox)" : "Sandbox"}</SelectItem>
+                <SelectItem value="simulation">{isAr ? "محاكاة (Simulation)" : "Simulation"}</SelectItem>
+                <SelectItem value="production">{isAr ? "إنتاج (Production)" : "Production"}</SelectItem>
+              </SelectContent>
+            </Select>
+            {/* Readiness */}
+            <Badge variant={requirementsMet === 4 ? "default" : "secondary"} className="text-xs px-3 py-1 ms-auto">
+              {requirementsMet}/4 {isAr ? "جاهز" : "Ready"}
+            </Badge>
           </div>
 
-          {zatcaStatus?.isFullyConfigured && (
-            <div className="mt-4 p-3 bg-green-50 dark:bg-green-950/30 rounded-lg border border-green-200 dark:border-green-800">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
-                <span className="font-semibold text-green-800 dark:text-green-200">
-                  {isAr ? "النظام جاهز للفوترة الإلكترونية" : "System Ready for E-Invoicing"}
-                </span>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Dashboard Stats */}
-      {dashboardStats && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">
-              {isAr ? "إحصائيات الفواتير" : "Invoice Statistics"}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <div className="text-center p-3 bg-blue-50 dark:bg-blue-950/30 rounded-lg">
-                <p className="text-2xl font-bold text-blue-700 dark:text-blue-300">{dashboardStats.total}</p>
-                <p className="text-xs text-blue-600 dark:text-blue-400">{isAr ? "إجمالي" : "Total"}</p>
-              </div>
-              <div className="text-center p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg">
-                <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">{dashboardStats.pending}</p>
-                <p className="text-xs text-amber-600 dark:text-amber-400">{isAr ? "معلقة" : "Pending"}</p>
-              </div>
-              <div className="text-center p-3 bg-green-50 dark:bg-green-950/30 rounded-lg">
-                <p className="text-2xl font-bold text-green-700 dark:text-green-300">{dashboardStats.accepted}</p>
-                <p className="text-xs text-green-600 dark:text-green-400">{isAr ? "مقبولة" : "Accepted"}</p>
-              </div>
-              <div className="text-center p-3 bg-red-50 dark:bg-red-950/30 rounded-lg">
-                <p className="text-2xl font-bold text-red-700 dark:text-red-300">{dashboardStats.rejected}</p>
-                <p className="text-xs text-red-600 dark:text-red-400">{isAr ? "مرفوضة" : "Rejected"}</p>
-              </div>
-              <div className="text-center p-3 bg-purple-50 dark:bg-purple-950/30 rounded-lg">
-                <p className="text-2xl font-bold text-purple-700 dark:text-purple-300">{dashboardStats.creditNotes}</p>
-                <p className="text-xs text-purple-600 dark:text-purple-400">{isAr ? "إشعارات دائنة" : "Credit Notes"}</p>
-              </div>
-            </div>
-
-            {dashboardStats.pending > 0 && (
-              <div className="mt-4">
+          {/* Invoice stats — single compact row */}
+          {dashboardStats && (
+            <div className="flex flex-wrap gap-2">
+              {[
+                { label: isAr ? "إجمالي" : "Total", value: dashboardStats.total, color: "text-foreground" },
+                { label: isAr ? "معلقة" : "Pending", value: dashboardStats.pending, color: "text-amber-600" },
+                { label: isAr ? "مقبولة" : "Accepted", value: dashboardStats.accepted, color: "text-green-600" },
+                { label: isAr ? "مرفوضة" : "Rejected", value: dashboardStats.rejected, color: "text-red-600" },
+              ].map((s) => (
+                <div key={s.label} className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-muted/50 text-xs">
+                  <span className={`font-bold ${s.color}`}>{s.value}</span>
+                  <span className="text-muted-foreground">{s.label}</span>
+                </div>
+              ))}
+              {dashboardStats.pending > 0 && (
                 <Button
+                  size="sm"
                   variant="outline"
+                  className="h-7 text-xs ms-auto"
                   onClick={() => batchSubmit.mutate()}
                   disabled={batchSubmit.isPending}
-                  className="w-full"
                 >
-                  <Wifi className="h-4 w-4 me-2" />
+                  <Wifi className="h-3 w-3 me-1" />
                   {batchSubmit.isPending
-                    ? (isAr ? "جاري الإرسال..." : "Submitting...")
-                    : (isAr ? `إرسال ${dashboardStats.pending} فاتورة معلقة إلى ZATCA` : `Submit ${dashboardStats.pending} Pending Invoices to ZATCA`)}
+                    ? (isAr ? "إرسال..." : "Sending...")
+                    : (isAr ? `إرسال ${dashboardStats.pending} معلقة` : `Submit ${dashboardStats.pending}`)}
                 </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+              )}
+            </div>
+          )}
 
-      {/* Environment Selection */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{isAr ? "بيئة ZATCA" : "ZATCA Environment"}</CardTitle>
-          <CardDescription>
-            {isAr
-              ? "اختر بيئة الاتصال مع منصة فاتورة"
-              : "Select the FATOORA platform connection environment"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Select
-            value={zatcaStatus?.environment || "sandbox"}
-            onValueChange={(val) => updateEnvironment.mutate(val)}
-          >
-            <SelectTrigger className="w-full max-w-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="sandbox">
-                {isAr ? "بيئة تجريبية (Sandbox)" : "Sandbox (Testing)"}
-              </SelectItem>
-              <SelectItem value="simulation">
-                {isAr ? "بيئة المحاكاة (Simulation)" : "Simulation"}
-              </SelectItem>
-              <SelectItem value="production">
-                {isAr ? "بيئة الإنتاج (Production)" : "Production (Live)"}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
-
-      {/* Device Registration */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{isAr ? "تسجيل الجهاز" : "Device Registration"}</CardTitle>
-          <CardDescription>
-            {isAr
-              ? "سجّل جهازك لدى هيئة الزكاة والضريبة والجمارك للبدء بإصدار الفواتير الإلكترونية"
-              : "Register your device with ZATCA to start issuing electronic invoices"}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Step 1: Compliance CSID */}
-          <div className={`p-4 rounded-lg border ${zatcaStatus?.hasComplianceCsid ? 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-800' : 'bg-card'}`}>
-            <h4 className="font-semibold flex items-center gap-2 mb-3">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs font-bold">1</span>
-              {isAr ? "الحصول على شهادة الامتثال (Compliance CSID)" : "Get Compliance CSID"}
-              {zatcaStatus?.hasComplianceCsid && <CheckCircle2 className="h-4 w-4 text-green-600" />}
-            </h4>
-            {!zatcaStatus?.hasComplianceCsid && (
-              <div className="space-y-4">
-                {/* Instructions box */}
-                <div className="p-3 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
-                  <p className="text-sm font-semibold text-blue-800 dark:text-blue-300 mb-2">
-                    {isAr ? "📋 كيف تحصل على رمز OTP؟" : "📋 How to get your OTP code?"}
-                  </p>
-                  {isAr ? (
-                    <ol className="text-xs text-blue-700 dark:text-blue-400 space-y-1.5 list-decimal list-inside">
-                      <li>ادخل على بوابة <strong>فاتورة</strong> من موقع هيئة الزكاة والضريبة والجمارك
-                        <a href="https://fatoora.zatca.gov.sa" target="_blank" rel="noopener noreferrer" className="underline font-semibold ms-1">fatoora.zatca.gov.sa</a>
-                      </li>
-                      <li>سجّل دخولك بحسابك في الهيئة</li>
-                      <li>اختر <strong>"Onboard New Solution Unit/Device"</strong> أو <strong>"إضافة جهاز جديد"</strong></li>
-                      <li>اضغط <strong>"Generate OTP"</strong> لإنشاء رمز التحقق</li>
-                      <li>انسخ الرمز وألصقه في الخانة أدناه</li>
-                    </ol>
-                  ) : (
-                    <ol className="text-xs text-blue-700 dark:text-blue-400 space-y-1.5 list-decimal list-inside">
-                      <li>Go to ZATCA's <strong>Fatoora</strong> portal
-                        <a href="https://fatoora.zatca.gov.sa" target="_blank" rel="noopener noreferrer" className="underline font-semibold ms-1">fatoora.zatca.gov.sa</a>
-                      </li>
-                      <li>Log in with your ZATCA account</li>
-                      <li>Select <strong>"Onboard New Solution Unit/Device"</strong></li>
-                      <li>Click <strong>"Generate OTP"</strong> to create a verification code</li>
-                      <li>Copy the code and paste it below</li>
-                    </ol>
-                  )}
-                  {zatcaStatus?.environment === 'sandbox' && (
-                    <div className="mt-2 p-2 rounded bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-700">
-                      <p className="text-xs text-amber-700 dark:text-amber-400">
-                        {isAr
-                          ? "💡 أنت في البيئة التجريبية — يمكنك استخدام الرمز 123456 للتجربة بدون الحاجة لبوابة فاتورة"
-                          : "💡 You're in Sandbox mode — you can use code 123456 for testing without the Fatoora portal"}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="text-sm font-medium">{isAr ? "رمز التحقق (OTP)" : "Verification Code (OTP)"}</label>
-                  <Input
-                    placeholder={isAr ? "ألصق الرمز هنا" : "Paste the code here"}
-                    value={otp}
-                    onChange={(e) => setOtp(e.target.value)}
-                    className="mt-1 text-lg tracking-widest"
-                    maxLength={6}
-                  />
-                </div>
-                <Button
-                  onClick={() => registerComplianceCsid.mutate()}
-                  disabled={registerComplianceCsid.isPending || !otp}
-                  className="w-full sm:w-auto"
-                >
-                  {registerComplianceCsid.isPending
-                    ? (isAr ? "جاري التسجيل..." : "Registering...")
-                    : (isAr ? "تسجيل الجهاز" : "Register Device")}
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {/* Step 2: Compliance Check */}
-          <div className={`p-4 rounded-lg border ${zatcaStatus?.hasComplianceCsid && !zatcaStatus?.hasProductionCsid ? 'bg-card' : 'opacity-60'}`}>
-            <h4 className="font-semibold flex items-center gap-2 mb-3">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs font-bold">2</span>
-              {isAr ? "فحص الامتثال" : "Compliance Check"}
-            </h4>
-            {zatcaStatus?.hasComplianceCsid && !zatcaStatus?.hasProductionCsid && (
-              <div>
-                <p className="text-sm text-muted-foreground mb-3">
-                  {isAr
-                    ? "يتم إرسال فاتورة تجريبية للتأكد من امتثال النظام"
-                    : "A test invoice will be sent to verify system compliance"}
-                </p>
-                <Button
-                  onClick={() => runComplianceCheck.mutate()}
-                  disabled={runComplianceCheck.isPending}
-                  variant="outline"
-                >
-                  {runComplianceCheck.isPending
-                    ? (isAr ? "جاري الفحص..." : "Checking...")
-                    : (isAr ? "بدء الفحص" : "Run Check")}
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {/* Step 3: Production CSID */}
-          <div className={`p-4 rounded-lg border ${zatcaStatus?.hasProductionCsid ? 'bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-800' : zatcaStatus?.hasComplianceCsid ? 'bg-card' : 'opacity-60'}`}>
-            <h4 className="font-semibold flex items-center gap-2 mb-3">
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-primary text-primary-foreground text-xs font-bold">3</span>
-              {isAr ? "الحصول على شهادة الإنتاج (Production CSID)" : "Get Production CSID"}
-              {zatcaStatus?.hasProductionCsid && <CheckCircle2 className="h-4 w-4 text-green-600" />}
-            </h4>
-            {zatcaStatus?.hasComplianceCsid && !zatcaStatus?.hasProductionCsid && (
-              <div>
-                <p className="text-sm text-muted-foreground mb-3">
-                  {isAr
-                    ? "الخطوة الأخيرة للحصول على شهادة الإنتاج وبدء إرسال الفواتير"
-                    : "Final step to get the production certificate and start submitting invoices"}
-                </p>
-                <Button
-                  onClick={() => getProductionCsid.mutate()}
-                  disabled={getProductionCsid.isPending}
-                >
-                  {getProductionCsid.isPending
-                    ? (isAr ? "جاري الحصول..." : "Getting...")
-                    : (isAr ? "الحصول على شهادة الإنتاج" : "Get Production CSID")}
-                </Button>
-              </div>
-            )}
-            {zatcaStatus?.hasProductionCsid && (
-              <p className="text-sm text-green-700 dark:text-green-300">
-                {isAr ? "جهازك مسجل وجاهز لإرسال الفواتير" : "Your device is registered and ready to submit invoices"}
-              </p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Requirements Checklist */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{isAr ? "متطلبات الفوترة الإلكترونية" : "E-Invoicing Requirements"}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-2">
+          {/* Requirements — single row of icons */}
+          <div className="flex flex-wrap gap-2 pt-1 border-t">
             {[
-              { key: "vatNumber", labelAr: "رقم ضريبي (VAT)", labelEn: "VAT Number", done: zatcaStatus?.hasVatNumber },
-              { key: "tax", labelAr: "تفعيل الضريبة (15%)", labelEn: "Tax Enabled (15%)", done: zatcaStatus?.taxEnabled },
-              { key: "config", labelAr: "الإعدادات الكاملة (عنوان، رقم مبنى، رمز بريدي)", labelEn: "Full Config (address, building no, postal)", done: zatcaStatus?.isFullyConfigured },
-              { key: "csid", labelAr: "شهادة الإنتاج CSID", labelEn: "Production CSID", done: zatcaStatus?.hasProductionCsid },
-            ].map((item) => (
-              <div key={item.key} className="flex items-center gap-3 p-2 rounded hover:bg-muted/50">
-                {item.done ? (
-                  <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-amber-500 shrink-0" />
-                )}
-                <span className={`text-sm ${item.done ? 'text-green-700 dark:text-green-300' : 'text-amber-700 dark:text-amber-300'}`}>
-                  {isAr ? item.labelAr : item.labelEn}
+              { labelAr: "رقم ضريبي", labelEn: "VAT", done: zatcaStatus?.hasVatNumber },
+              { labelAr: "الضريبة 15%", labelEn: "Tax 15%", done: zatcaStatus?.taxEnabled },
+              { labelAr: "العنوان الكامل", labelEn: "Address", done: zatcaStatus?.isFullyConfigured },
+              { labelAr: "شهادة الإنتاج", labelEn: "Production CSID", done: zatcaStatus?.hasProductionCsid },
+            ].map((r) => (
+              <div key={r.labelEn} className="flex items-center gap-1 text-xs">
+                {r.done
+                  ? <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                  : <AlertCircle className="h-3.5 w-3.5 text-amber-500" />}
+                <span className={r.done ? "text-green-700 dark:text-green-400" : "text-amber-700 dark:text-amber-400"}>
+                  {isAr ? r.labelAr : r.labelEn}
                 </span>
               </div>
             ))}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* ═══════ 2. Device Management + Registration — single card ═══════ */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Building2 className="h-4 w-4" />
+            {isAr ? "تسجيل الأجهزة" : "Device Registration"}
+          </CardTitle>
+          <CardDescription className="text-xs">
+            {isAr
+              ? "اختر الفرع، أضف جهاز كاشير، ثم سجّله لدى ZATCA"
+              : "Select a branch, add a cashier device, then register it with ZATCA"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+
+          {/* Branch + Device selector row */}
+          <div className="flex flex-wrap gap-3">
+            <div className="flex-1 min-w-[200px]">
+              <label className="text-xs font-medium text-muted-foreground mb-1 block">{isAr ? "الفرع" : "Branch"}</label>
+              <Select value={selectedBranchId} onValueChange={(val) => { setSelectedBranchId(val); setSelectedDeviceId(""); }}>
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder={isAr ? "اختر الفرع..." : "Select branch..."} />
+                </SelectTrigger>
+                <SelectContent>
+                  {zatcaStatus?.branches?.map((b: any) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {isAr ? (b.nameAr || b.name) : b.name}
+                      {b.isMain ? (isAr ? " (رئيسي)" : " (Main)") : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedBranchId && (
+              <div className="flex items-end gap-2">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground mb-1 block">{isAr ? "جهاز جديد" : "New device"}</label>
+                  <Input
+                    placeholder={isAr ? "اسم الكاشير" : "Cashier name"}
+                    value={newDeviceName}
+                    onChange={(e) => setNewDeviceName(e.target.value)}
+                    className="h-9 w-40 text-sm"
+                  />
+                </div>
+                <Button size="sm" className="h-9" onClick={() => createDevice.mutate()} disabled={createDevice.isPending}>
+                  <Plus className="h-3.5 w-3.5 me-1" />
+                  {isAr ? "إضافة" : "Add"}
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* Devices list */}
+          {selectedBranchId && (
+            <>
+              {branchDevices && branchDevices.length > 0 ? (
+                <div className="grid gap-2">
+                  {branchDevices.map((device: any) => (
+                    <div
+                      key={device.id}
+                      onClick={() => setSelectedDeviceId(device.id)}
+                      className={`flex items-center justify-between p-2.5 rounded-lg border cursor-pointer transition-all ${
+                        selectedDeviceId === device.id
+                          ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                          : 'hover:bg-muted/50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${device.registrationStep >= 3 ? 'bg-green-500' : device.registrationStep >= 1 ? 'bg-amber-500' : 'bg-gray-300'}`} />
+                        <span className="font-medium text-sm">{device.name}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">{device.serialNumber?.slice(-8)}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant={device.registrationStep >= 3 ? "default" : device.registrationStep >= 1 ? "secondary" : "outline"} className="text-[10px] h-5">
+                          {device.registrationStep >= 3
+                            ? (isAr ? "مسجّل ✓" : "Active ✓")
+                            : device.registrationStep >= 1
+                              ? (isAr ? `خطوة ${device.registrationStep}/3` : `Step ${device.registrationStep}/3`)
+                              : (isAr ? "جديد" : "New")}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-5 w-5 p-0 text-muted-foreground hover:text-destructive"
+                          onClick={(e) => { e.stopPropagation(); deleteDevice.mutate(device.id); }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-6 text-sm text-muted-foreground border rounded-lg border-dashed">
+                  {isAr
+                    ? "لا توجد أجهزة. أضف كاشير أعلاه لبدء التسجيل."
+                    : "No devices yet. Add a cashier above to start."}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ─── Registration Steps ─── */}
+          {selectedBranchId && (
+            <div className="border-t pt-4 space-y-3">
+              <p className="text-xs font-medium text-muted-foreground">
+                {isAr ? "خطوات التسجيل" : "Registration Steps"}
+                {selectedDevice && <span className="font-bold text-foreground ms-1">— {selectedDevice.name}</span>}
+              </p>
+
+              {/* Step 1 */}
+              <div className={`p-3 rounded-lg border transition-all ${deviceHasComplianceCsid ? 'bg-green-50/50 dark:bg-green-950/10 border-green-200 dark:border-green-900' : 'bg-card'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${deviceHasComplianceCsid ? 'bg-green-600 text-white' : 'bg-primary text-primary-foreground'}`}>1</span>
+                  <span className="text-sm font-semibold">{isAr ? "شهادة الامتثال" : "Compliance CSID"}</span>
+                  {deviceHasComplianceCsid && <CheckCircle2 className="h-4 w-4 text-green-600 ms-auto" />}
+                </div>
+                {!deviceHasComplianceCsid && (
+                  <div className="space-y-3 ms-7">
+                    {!zatcaStatus?.hasVatNumber && (
+                      <p className="text-xs text-red-600 flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" />
+                        {isAr ? "أدخل الرقم الضريبي أولاً في إعدادات المطعم" : "Enter VAT number first in restaurant settings"}
+                      </p>
+                    )}
+                    <div className="p-2.5 rounded bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 text-xs text-blue-700 dark:text-blue-400">
+                      {isAr ? (
+                        <p>ادخل بوابة <a href="https://fatoora.zatca.gov.sa" target="_blank" rel="noopener noreferrer" className="underline font-bold">fatoora.zatca.gov.sa</a> ← إضافة جهاز ← Generate OTP ← انسخ الرمز هنا</p>
+                      ) : (
+                        <p>Go to <a href="https://fatoora.zatca.gov.sa" target="_blank" rel="noopener noreferrer" className="underline font-bold">fatoora.zatca.gov.sa</a> → Add Device → Generate OTP → Paste below</p>
+                      )}
+                      {zatcaStatus?.environment === 'sandbox' && (
+                        <p className="mt-1 text-amber-600 dark:text-amber-400">
+                          {isAr ? "💡 بيئة تجريبية: استخدم الرمز 123456" : "💡 Sandbox: use code 123456"}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="OTP"
+                        value={otp}
+                        onChange={(e) => setOtp(e.target.value)}
+                        className="h-9 w-32 text-center tracking-[0.3em] font-mono"
+                        maxLength={6}
+                        disabled={!zatcaStatus?.hasVatNumber}
+                      />
+                      <Button
+                        size="sm"
+                        className="h-9"
+                        onClick={() => registerComplianceCsid.mutate()}
+                        disabled={registerComplianceCsid.isPending || !otp || !zatcaStatus?.hasVatNumber}
+                      >
+                        {registerComplianceCsid.isPending
+                          ? (isAr ? "جاري..." : "...")
+                          : (isAr ? "تسجيل" : "Register")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2 */}
+              <div className={`p-3 rounded-lg border transition-all ${!deviceHasComplianceCsid ? 'opacity-40 pointer-events-none' : deviceHasProductionCsid ? 'bg-green-50/50 dark:bg-green-950/10 border-green-200 dark:border-green-900' : 'bg-card'}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${deviceHasComplianceCsid ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>2</span>
+                  <span className="text-sm font-semibold">{isAr ? "فحص الامتثال" : "Compliance Check"}</span>
+                  {deviceHasComplianceCsid && !deviceHasProductionCsid && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs ms-auto"
+                      onClick={() => runComplianceCheck.mutate()}
+                      disabled={runComplianceCheck.isPending}
+                    >
+                      {runComplianceCheck.isPending ? (isAr ? "جاري..." : "...") : (isAr ? "بدء الفحص" : "Run Check")}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Step 3 */}
+              <div className={`p-3 rounded-lg border transition-all ${!deviceHasComplianceCsid ? 'opacity-40 pointer-events-none' : deviceHasProductionCsid ? 'bg-green-50/50 dark:bg-green-950/10 border-green-200 dark:border-green-900' : 'bg-card'}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${deviceHasProductionCsid ? 'bg-green-600 text-white' : deviceHasComplianceCsid ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>3</span>
+                  <span className="text-sm font-semibold">{isAr ? "شهادة الإنتاج" : "Production CSID"}</span>
+                  {deviceHasProductionCsid && <CheckCircle2 className="h-4 w-4 text-green-600 ms-auto" />}
+                  {deviceHasComplianceCsid && !deviceHasProductionCsid && (
+                    <Button
+                      size="sm"
+                      className="h-7 text-xs ms-auto"
+                      onClick={() => getProductionCsid.mutate()}
+                      disabled={getProductionCsid.isPending}
+                    >
+                      {getProductionCsid.isPending ? (isAr ? "جاري..." : "...") : (isAr ? "الحصول على الشهادة" : "Get CSID")}
+                    </Button>
+                  )}
+                </div>
+                {deviceHasProductionCsid && (
+                  <p className="text-xs text-green-600 ms-7 mt-1">
+                    {isAr ? "الجهاز مسجل وجاهز لإرسال الفواتير ✓" : "Device registered and ready to submit invoices ✓"}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
