@@ -146,6 +146,8 @@ export default function CustomerMenuPage() {
   const [showCheckout, setShowCheckout] = useState(false);
   const categoryTabsRef = useRef<HTMLDivElement>(null);
   const userClickedCategoryRef = useRef(false);
+  const clickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [scrollSpyCategory, setScrollSpyCategory] = useState<string | null>(null);
 
   // Light/Dark mode for customer menu
   const [menuDark, setMenuDark] = useState(() => {
@@ -187,12 +189,18 @@ export default function CustomerMenuPage() {
     }
   }, [loggedInCustomer]);
 
+  // Sync orderType when tableId changes (e.g., navigation)
+  useEffect(() => {
+    if (tableId) setOrderType("dine_in");
+  }, [tableId]);
+
   // Check for paid deposit when phone number changes
   useEffect(() => {
     if (depositCheckTimer.current) clearTimeout(depositCheckTimer.current);
     setDepositInfo(null);
+    setDepositReservationId(null);
     const phone = customerPhone.replace(/\s/g, '');
-    if (phone.length >= 5 && isPublic) {
+    if (phone.length >= 8 && isPublic) {
       depositCheckTimer.current = setTimeout(async () => {
         try {
           const res = await fetch(`${apiBase}/check-deposit?phone=${encodeURIComponent(phone)}`);
@@ -539,6 +547,14 @@ export default function CustomerMenuPage() {
             ? "نأسف، لم يتم فتح الوردية اليومية بعد. يرجى الطلب لاحقاً." 
             : "Sorry, the daily session hasn't started yet. Please order later.",
         });
+      } else if (errData?.error === "cashNotAllowed") {
+        toast({
+          variant: "destructive",
+          title: language === "ar" ? "الدفع النقدي غير متاح" : "Cash Not Accepted",
+          description: language === "ar"
+            ? "الدفع النقدي غير مقبول للطلبات الإلكترونية في هذا المطعم"
+            : "Cash payment is not accepted for online orders at this restaurant",
+        });
       } else {
         toast({
           variant: "destructive",
@@ -566,7 +582,13 @@ export default function CustomerMenuPage() {
   const addToCartFromDetail = () => {
     if (!showItemDetail) return;
     const item = showItemDetail;
-    const cartKey = `${item.id}_${detailVariant?.id || "none"}_${detailCustomizations.map(c => c.optionId).sort().join(",")}`;
+    if (item.isAvailable === false) return;
+    // Normalize customization key: sort by groupId then optionId to ensure order-independence
+    const sortedCustKey = [...detailCustomizations]
+      .sort((a, b) => a.groupId.localeCompare(b.groupId) || a.optionId.localeCompare(b.optionId))
+      .map(c => `${c.groupId}:${c.optionId}`)
+      .join(",");
+    const cartKey = `${item.id}_${detailVariant?.id || "none"}_${sortedCustKey}`;
     setCart((prev) => {
       const existing = prev.find((c) => c.cartKey === cartKey);
       if (existing) {
@@ -672,31 +694,32 @@ export default function CustomerMenuPage() {
     return () => observer.disconnect();
   }, [selectedCategory, searchQuery, categories, menuItems]);
 
-  const [scrollSpyCategory, setScrollSpyCategory] = useState<string | null>(null);
-
   // When user clicks a category tab, scroll to that section
   const handleCategoryClick = useCallback((catId: string | null) => {
+    // Clear any pending timeout from a previous click to avoid race conditions
+    if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
     userClickedCategoryRef.current = true;
-    setSelectedCategory(catId);
+    // Only update the visual highlight — never filter items via selectedCategory,
+    // because setting selectedCategory hides data-category-section elements from the DOM,
+    // which causes the scroll target to not exist and the menu to jump to the wrong category.
     setScrollSpyCategory(catId);
     if (catId) {
-      // scroll to the section
       setTimeout(() => {
         const el = document.querySelector(`[data-category-section="${catId}"]`) as HTMLElement;
         if (el) {
-          const offset = 160; // account for sticky header + tabs
+          const offset = 160;
           const top = el.getBoundingClientRect().top + window.scrollY - offset;
           window.scrollTo({ top, behavior: 'smooth' });
         }
-        // Re-enable scroll spy after scroll animation finishes
-        setTimeout(() => {
+        clickTimeoutRef.current = setTimeout(() => {
           userClickedCategoryRef.current = false;
-          setSelectedCategory(null); // back to showing all, but scrollSpyCategory tracks the visual highlight
-        }, 600);
+        }, 700);
       }, 50);
     } else {
       window.scrollTo({ top: 0, behavior: 'smooth' });
-      setTimeout(() => { userClickedCategoryRef.current = false; }, 600);
+      clickTimeoutRef.current = setTimeout(() => {
+        userClickedCategoryRef.current = false;
+      }, 700);
     }
   }, []);
 
@@ -734,10 +757,14 @@ export default function CustomerMenuPage() {
       toast({ variant: "destructive", title: t("address") });
       return;
     }
-    if (!customerPhone.trim()) {
+    const phoneClean = customerPhone.replace(/\s/g, '');
+    if (phoneClean.length < 8) {
       toast({
         variant: "destructive",
-        title: language === "ar" ? "أدخل رقم الجوال" : "Enter phone number",
+        title: language === "ar" ? "رقم الجوال غير صحيح" : "Invalid phone number",
+        description: language === "ar"
+          ? (phoneClean.length === 0 ? "أدخل رقم الجوال" : "يجب أن يكون رقم الجوال 8 أرقام على الأقل")
+          : (phoneClean.length === 0 ? "Enter your phone number" : "Phone number must be at least 8 digits"),
       });
       return;
     }
@@ -746,10 +773,12 @@ export default function CustomerMenuPage() {
 
   const submitOrder = () => {
     setShowConfirmation(false);
-    // For dine_in with tableId, use "pending" payment method to wait for cashier confirmation
+    // Table dine-in orders: always sent as "pending" cash orders — the cashier
+    // collects payment (cash or card) after the customer finishes eating.
+    // We never redirect table QR orders to an online payment gateway upfront.
     const isDineInTable = orderType === "dine_in" && tableId;
-    const finalPaymentMethod = isDineInTable 
-      ? "pending" 
+    const finalPaymentMethod = isDineInTable
+      ? "cash"   // placeholder: real payment happens after kitchen marks ready
       : (paymentMethod === "tap_to_pay" ? "edfapay_online" : "cash");
     
     placeOrderMutation.mutate({
@@ -821,86 +850,142 @@ export default function CustomerMenuPage() {
           </div>
         </header>
 
-        <main className="max-w-lg mx-auto p-4 space-y-4">
-          <div className="text-center py-4">
-            <div className={`inline-flex items-center gap-2 ${d ? 'bg-[#8B1A1A]/15 text-[#e88]' : 'bg-[#8B1A1A]/8 text-[#8B1A1A]'} px-4 py-2 rounded-full text-sm font-medium`}>
-              <Badge variant="secondary" className="bg-[#8B1A1A] text-white">
-                {table ? `${language === "ar" ? "طاولة" : "Table"} ${table.tableNumber}` : ""}
-              </Badge>
-              <span>{statusText(activeOrder.status)}</span>
+        <main className="max-w-lg mx-auto px-4 pb-8 space-y-4">
+          {/* Status pill */}
+          <div className="flex items-center justify-center pt-2 pb-1">
+            <div className={`inline-flex items-center gap-3 px-5 py-2.5 rounded-2xl border ${
+              activeOrder.status === "ready"
+                ? d ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                : activeOrder.status === "pending"
+                ? d ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' : 'bg-amber-50 border-amber-200 text-amber-700'
+                : d ? 'bg-blue-500/10 border-blue-500/20 text-blue-400' : 'bg-blue-50 border-blue-200 text-blue-700'
+            }`}>
+              <div className={`w-2 h-2 rounded-full animate-pulse ${
+                activeOrder.status === "ready" ? 'bg-emerald-500' : activeOrder.status === "pending" ? 'bg-amber-500' : 'bg-blue-500'
+              }`} />
+              {table && (
+                <span className={`font-bold text-[13px]`}>
+                  {language === "ar" ? "طاولة" : "Table"} {table.tableNumber}
+                </span>
+              )}
+              <span className="text-[13px] font-medium">{statusText(activeOrder.status)}</span>
             </div>
           </div>
 
-          <div className={`${d ? 'bg-white/[0.03] border-white/[0.06]' : 'bg-white border-gray-200/60 shadow-sm'} rounded-2xl border p-5`}>
-              <div className="flex items-center justify-between mb-4">
-                <h2 className={`text-lg font-bold ${d ? 'text-white' : 'text-gray-900'}`}>
+          {/* Order card */}
+          <div className={`${d ? 'bg-[#1a1a1a] border-white/[0.06]' : 'bg-white border-gray-200/60 shadow-sm'} rounded-2xl border overflow-hidden`}>
+            <div className={`px-5 py-4 border-b ${d ? 'border-white/[0.05]' : 'border-gray-100'} flex items-center justify-between`}>
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#8B1A1A] flex items-center justify-center">
+                  <ChefHat className="h-4 w-4 text-white" />
+                </div>
+                <h2 className={`text-[15px] font-bold ${d ? 'text-white' : 'text-gray-900'}`}>
                   {language === "ar" ? "طلبك الحالي" : "Your Current Order"}
                 </h2>
-                <span className={`text-sm ${d ? 'text-white/40' : 'text-gray-400'}`}>#{activeOrder.orderNumber}</span>
               </div>
-
-              <div className="space-y-3">
-                {activeOrder.items?.map((item: any, idx: number) => (
-                  <div key={idx} className={`flex items-center justify-between py-2 border-b last:border-0 ${d ? 'border-white/5' : 'border-gray-100'}`}>
-                    <div className="flex-1">
-                      <p className={`font-medium text-sm ${d ? 'text-white' : 'text-gray-900'}`}>
+              <span className={`text-xs font-mono font-semibold ${d ? 'text-white/30 bg-white/[0.04]' : 'text-gray-400 bg-gray-50'} px-2.5 py-1 rounded-lg`}>#{activeOrder.orderNumber}</span>
+            </div>
+            <div className="px-5 py-3 space-y-0 divide-y">
+              {activeOrder.items?.map((item: any, idx: number) => (
+                <div key={idx} className={`flex items-center justify-between py-3 ${d ? 'divide-white/5' : 'divide-gray-50'}`}>
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${d ? 'bg-white/[0.05]' : 'bg-gray-50'}`}>
+                      <span className={`text-[11px] font-bold ${d ? 'text-white/50' : 'text-gray-500'}`}>×{item.quantity}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`font-semibold text-[13px] ${d ? 'text-white' : 'text-gray-900'} truncate`}>
                         {getLocalizedName(item.menuItem?.nameEn, item.menuItem?.nameAr) || (language === "ar" ? "عنصر" : "Item")}
                       </p>
-                      <p className={`text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>
-                        x{item.quantity} • {parseFloat(item.unitPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
+                      <p className={`text-[11px] ${d ? 'text-white/35' : 'text-gray-400'}`}>
+                        {parseFloat(item.unitPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"} {language === "ar" ? "للواحد" : "each"}
                       </p>
                     </div>
-                    <span className={`font-medium text-sm ${d ? 'text-white' : 'text-gray-900'}`}>
-                      {parseFloat(item.totalPrice || "0").toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
-                    </span>
                   </div>
-                ))}
+                  <span className={`font-bold text-[13px] text-[#8B1A1A] tabular-nums flex-shrink-0`}>
+                    {parseFloat(item.totalPrice || "0").toFixed(2)} <span className={`text-[10px] font-normal ${d ? 'text-white/25' : 'text-gray-400'}`}>{language === "ar" ? "ر.س" : "SAR"}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className={`px-5 py-4 border-t ${d ? 'border-white/[0.07] bg-white/[0.02]' : 'border-gray-100 bg-gray-50/50'} flex items-center justify-between`}>
+              <span className={`text-[15px] font-bold ${d ? 'text-white' : 'text-gray-900'}`}>{language === "ar" ? "المجموع الكلي" : "Total"}</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-[22px] font-bold text-[#8B1A1A] tabular-nums">{orderTotal.toFixed(2)}</span>
+                <span className={`text-[12px] font-medium ${d ? 'text-white/40' : 'text-gray-400'}`}>{language === "ar" ? "ر.س" : "SAR"}</span>
               </div>
-
-              <div className={`mt-4 pt-4 border-t ${d ? 'border-white/10' : 'border-gray-200'} flex items-center justify-between`}>
-                <span className={`text-lg font-bold ${d ? 'text-white' : 'text-gray-900'}`}>{language === "ar" ? "المجموع" : "Total"}</span>
-                <span className="text-lg font-bold text-[#8B1A1A]">
-                  {orderTotal.toFixed(2)} {language === "ar" ? "ر.س" : "SAR"}
-                </span>
-              </div>
+            </div>
           </div>
 
-          {/* إذا الطلب pending - انتظر موافقة الكاشير */}
-          {activeOrder.status === "pending" ? (
-            <div className={`w-full p-4 rounded-xl text-center ${d ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-amber-50 border border-amber-200'}`}>
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <div className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
-                <span className={`font-medium ${d ? 'text-amber-400' : 'text-amber-700'}`}>
+          {/* Status action */}
+          {activeOrder.status === "ready" ? (
+            <div className="space-y-3">
+              <div className={`w-full p-4 rounded-2xl text-center ${d ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-emerald-50 border border-emerald-200'}`}>
+                <div className="flex items-center justify-center gap-2 mb-1.5">
+                  <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full" />
+                  <span className={`font-bold text-sm ${d ? 'text-emerald-400' : 'text-emerald-700'}`}>
+                    {language === "ar" ? "طلبك جاهز!" : "Your order is ready!"}
+                  </span>
+                </div>
+                <p className={`text-xs ${d ? 'text-white/45' : 'text-gray-500'}`}>
+                  {language === "ar" ? "ادفع من خلال هاتفك أو من الكاشير" : "Pay via your phone or at the cashier"}
+                </p>
+              </div>
+              <Button
+                className="w-full h-14 text-[15px] font-bold bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-3 rounded-2xl shadow-sm"
+                onClick={async () => {
+                  try {
+                    const baseUrl = window.location.origin;
+                    const callbackUrl = `${baseUrl}/payment-callback/${activeOrder.id}`;
+                    const res = await fetch("/api/payments/create-session", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ orderId: activeOrder.id, callbackUrl }),
+                    });
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => ({}));
+                      throw new Error(err.error || "فشل إنشاء جلسة الدفع");
+                    }
+                    const data = await res.json();
+                    if (data.redirect_url || data.redirectUrl) {
+                      window.location.href = data.redirect_url || data.redirectUrl;
+                    } else {
+                      throw new Error("لم يُعد رابط الدفع");
+                    }
+                  } catch (e: any) {
+                    alert(e.message || "حدث خطأ");
+                  }
+                }}
+              >
+                <Smartphone className="h-5 w-5" />
+                {language === "ar" ? `ادفع ${orderTotal.toFixed(2)} ر.س` : `Pay ${orderTotal.toFixed(2)} SAR`}
+              </Button>
+            </div>
+          ) : activeOrder.status === "pending" ? (
+            <div className={`w-full px-5 py-4 rounded-2xl text-center ${d ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-amber-50 border border-amber-200'}`}>
+              <div className="flex items-center justify-center gap-2.5 mb-1.5">
+                <div className="w-2.5 h-2.5 bg-amber-500 rounded-full animate-pulse" />
+                <span className={`font-bold text-sm ${d ? 'text-amber-400' : 'text-amber-700'}`}>
                   {language === "ar" ? "بانتظار تأكيد الكاشير" : "Waiting for cashier confirmation"}
                 </span>
               </div>
-              <p className={`text-sm ${d ? 'text-white/50' : 'text-gray-500'}`}>
+              <p className={`text-xs ${d ? 'text-white/45' : 'text-gray-500'}`}>
                 {language === "ar" ? "سيتم تحضير طلبك فور تأكيده" : "Your order will be prepared once confirmed"}
               </p>
             </div>
           ) : (
-            <>
-              {/* For Table Orders, FORCE Pay at Cashier (Requested by user to prevent fraud) */}
-              <div className={`w-full p-4 rounded-xl text-center mb-4 ${d ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-blue-50 border border-blue-200'}`}>
-                 <p className={`font-medium ${d ? 'text-blue-400' : 'text-blue-700'}`}>
-                    {language === "ar" ? "يرجى الدفع عند الكاشير" : "Please pay at the cashier"}
-                 </p>
-                 <p className={`text-xs mt-1 ${d ? 'text-white/50' : 'text-gray-500'}`}>
-                    {language === "ar" ? "يمكنك طلب المزيد أو الدفع عند الانتهاء" : "You can order more or pay when finished"}
-                 </p>
+            <div className={`w-full px-5 py-4 rounded-2xl text-center ${d ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-blue-50 border border-blue-200'}`}>
+              <div className="flex items-center justify-center gap-2.5 mb-1.5">
+                <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse" />
+                <span className={`font-bold text-sm ${d ? 'text-blue-400' : 'text-blue-700'}`}>
+                  {activeOrder.status === "confirmed"
+                    ? (language === "ar" ? "تم تأكيد طلبك، جاري إرساله للمطبخ" : "Order confirmed, sending to kitchen")
+                    : (language === "ar" ? "جاري تحضير طلبك في المطبخ" : "Your order is being prepared")}
+                </span>
               </div>
-
-              {/* Only show 'Pay Now' for non-table orders (Pickup/Delivery) if we ever support them here */}
-              {!tableId && (
-                <Button
-                  className="w-full h-12 text-base bg-[#8B1A1A] hover:bg-[#A02020] text-white gap-2 rounded-xl shadow-sm"
-                  onClick={() => setLocation(`/payment/${activeOrder.id}`)}
-                >
-                  <Smartphone className="h-5 w-5" />
-                  {language === "ar" ? "ادفع الآن" : "Pay Now"}
-                </Button>
-              )}
-            </>
+              <p className={`text-xs ${d ? 'text-white/45' : 'text-gray-500'}`}>
+                {language === "ar" ? "سيظهر زر الدفع عندما يصبح طلبك جاهزاً" : "Payment button will appear when your order is ready"}
+              </p>
+            </div>
           )}
         </main>
       </div>
@@ -982,14 +1067,14 @@ export default function CustomerMenuPage() {
         <main className="max-w-lg mx-auto px-4 pt-4 pb-28 space-y-5">
           {/* Table info */}
           {table && (
-            <div className={`flex items-center gap-3 ${d ? 'bg-[#8B1A1A]/10 border-[#8B1A1A]/20' : 'bg-[#8B1A1A]/5 border-[#8B1A1A]/15'} border rounded-2xl p-3.5`} data-testid="card-table-info">
-              <div className={`w-10 h-10 rounded-xl ${d ? 'bg-[#8B1A1A]/25' : 'bg-[#8B1A1A]/10'} flex items-center justify-center flex-shrink-0`}>
-                <MapPin className="h-4 w-4 text-[#8B1A1A]" />
+            <div className={`flex items-center gap-3.5 ${d ? 'bg-[#8B1A1A]/10 border-[#8B1A1A]/20' : 'bg-[#8B1A1A]/5 border-[#8B1A1A]/15'} border rounded-2xl p-4`} data-testid="card-table-info">
+              <div className={`w-11 h-11 rounded-xl ${d ? 'bg-[#8B1A1A]/30' : 'bg-[#8B1A1A]/10'} flex items-center justify-center flex-shrink-0`}>
+                <MapPin className="h-5 w-5 text-[#8B1A1A]" />
               </div>
               <div>
-                <p className={`font-semibold text-sm ${d ? 'text-white' : 'text-gray-900'}`} data-testid="text-table-number">{t("youAreAtTable")} {table.tableNumber}</p>
+                <p className={`font-bold text-[14px] ${d ? 'text-white' : 'text-gray-900'}`} data-testid="text-table-number">{t("youAreAtTable")} {table.tableNumber}</p>
                 {table.location && (
-                  <p className={`text-xs ${d ? 'text-white/40' : 'text-gray-400'}`}>{table.location}</p>
+                  <p className={`text-xs mt-0.5 ${d ? 'text-white/40' : 'text-gray-400'}`}>{table.location}</p>
                 )}
               </div>
             </div>
@@ -997,7 +1082,7 @@ export default function CustomerMenuPage() {
 
           {/* Cart items */}
           <div className="space-y-3">
-            <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{t("orderItems")}</h2>
+            <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{t("orderItems")}</h2>
             <div className={`${d ? 'bg-white/[0.03] border-white/[0.06]' : 'bg-white border-gray-200/60 shadow-sm'} rounded-2xl border overflow-hidden divide-y ${d ? 'divide-white/[0.05]' : 'divide-gray-100'}`}>
             {cart.map((item) => (
               <div key={item.cartKey} className="p-4" data-testid={`card-checkout-item-${item.cartKey}`}>
@@ -1053,7 +1138,7 @@ export default function CustomerMenuPage() {
           {/* Order Type */}
           {!tableId && (
             <div className="space-y-3">
-              <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{t("selectOrderType")}</h2>
+              <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{t("selectOrderType")}</h2>
               <div className="grid grid-cols-3 gap-2">
                 {["dine_in", "pickup", "delivery"].map((type) => (
                   <button
@@ -1075,7 +1160,7 @@ export default function CustomerMenuPage() {
 
           {/* Customer Info */}
           <div className="space-y-3">
-            <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{t("customerInfo")}</h2>
+            <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{t("customerInfo")}</h2>
             <div className={`${d ? 'bg-white/[0.03] border-white/[0.06]' : 'bg-white border-gray-200/60 shadow-sm'} rounded-2xl border p-4 space-y-3`}>
               <div className="relative">
                 <Phone className={`absolute ${direction === 'rtl' ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 h-4 w-4 ${d ? 'text-white/20' : 'text-gray-400'}`} />
@@ -1084,7 +1169,7 @@ export default function CustomerMenuPage() {
                   type="tel"
                   inputMode="numeric"
                   pattern="[0-9]*"
-                  maxLength={12}
+                  maxLength={13}
                   value={customerPhone}
                   onChange={(e) => {
                     // فقط أرقام وعلامة + في البداية
@@ -1145,7 +1230,7 @@ export default function CustomerMenuPage() {
 
           {/* Kitchen Notes */}
           <div className="space-y-3">
-            <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{t("kitchenNotes")}</h2>
+            <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{t("kitchenNotes")}</h2>
             <Textarea
               placeholder={t("specialRequests")}
               value={kitchenNotes}
@@ -1157,7 +1242,7 @@ export default function CustomerMenuPage() {
 
           {/* Coupon Code */}
           <div className="space-y-3">
-            <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{language === "ar" ? "كود الخصم" : "Discount Code"}</h2>
+            <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{language === "ar" ? "كود الخصم" : "Discount Code"}</h2>
             {couponApplied ? (
               <div className={`flex items-center justify-between ${d ? 'bg-emerald-950/40 border-emerald-800/30' : 'bg-emerald-50 border-emerald-200'} border rounded-xl p-3.5`}>
                 <div className="flex items-center gap-2">
@@ -1194,49 +1279,61 @@ export default function CustomerMenuPage() {
           </div>
 
           {/* Payment Method */}
-          {!(orderType === "dine_in" && tableId) && (
-            <div className="space-y-3">
-              <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{language === "ar" ? "طريقة الدفع" : "Payment Method"}</h2>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setPaymentMethod("tap_to_pay")}
-                  className={`flex flex-col items-center gap-2 h-20 rounded-xl transition-all duration-200 ${
-                    paymentMethod === "tap_to_pay"
-                      ? 'bg-[#8B1A1A] text-white ring-2 ring-[#8B1A1A]'
-                      : d ? 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] ring-1 ring-white/[0.06]' : 'bg-white text-gray-600 hover:bg-gray-50 ring-1 ring-gray-200/60 shadow-sm'
-                  }`}
-                  data-testid="button-payment-tap-to-pay"
-                >
-                  <Smartphone className="h-5 w-5" />
-                  <span className="text-xs font-semibold">{language === "ar" ? "الدفع بالجوال" : "Mobile Pay"}</span>
-                </button>
-                <button
-                  onClick={() => setPaymentMethod("cash")}
-                  className={`flex flex-col items-center gap-2 h-20 rounded-xl transition-all duration-200 ${
-                    paymentMethod === "cash"
-                      ? 'bg-[#8B1A1A] text-white ring-2 ring-[#8B1A1A]'
-                      : d ? 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] ring-1 ring-white/[0.06]' : 'bg-white text-gray-600 hover:bg-gray-50 ring-1 ring-gray-200/60 shadow-sm'
-                  }`}
-                  data-testid="button-payment-cash"
-                >
-                  <Banknote className="h-5 w-5" />
-                  <span className="text-xs font-semibold">{language === "ar" ? "نقد" : "Cash"}</span>
-                </button>
+          {(() => {
+            const isDineInTable = orderType === "dine_in" && !!tableId;
+            if (isDineInTable) {
+              // Table QR orders: no upfront payment — customer pays after kitchen marks ready
+              return (
+                <div className={`w-full p-4 rounded-xl text-center ${d ? 'bg-white/[0.03] border border-white/[0.06]' : 'bg-gray-50 border border-gray-200'}`}>
+                  <Smartphone className={`h-6 w-6 mx-auto mb-2 ${d ? 'text-white/60' : 'text-gray-500'}`} />
+                  <p className={`text-sm font-medium ${d ? 'text-white/80' : 'text-gray-700'}`}>
+                    {language === "ar" ? "الدفع بعد تحضير طلبك" : "Pay after your order is ready"}
+                  </p>
+                  <p className={`text-xs mt-1 ${d ? 'text-white/40' : 'text-gray-400'}`}>
+                    {language === "ar" ? "ستظهر لك زر الدفع عبر الجوال عندما يصبح طلبك جاهزًا" : "A pay button will appear when your order is ready"}
+                  </p>
+                </div>
+              );
+            }
+            const cashAllowed = restaurant?.allowCashOnPublicQR !== false;
+            return (
+              <div className="space-y-3">
+                <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{language === "ar" ? "طريقة الدفع" : "Payment Method"}</h2>
+                <div className={`grid gap-3 ${cashAllowed ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                  <button
+                    onClick={() => setPaymentMethod("tap_to_pay")}
+                    className={`flex flex-col items-center gap-2 h-20 rounded-xl transition-all duration-200 ${
+                      paymentMethod === "tap_to_pay"
+                        ? 'bg-[#8B1A1A] text-white ring-2 ring-[#8B1A1A]'
+                        : d ? 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] ring-1 ring-white/[0.06]' : 'bg-white text-gray-600 hover:bg-gray-50 ring-1 ring-gray-200/60 shadow-sm'
+                    }`}
+                    data-testid="button-payment-tap-to-pay"
+                  >
+                    <Smartphone className="h-5 w-5" />
+                    <span className="text-xs font-semibold">{language === "ar" ? "الدفع بالجوال" : "Mobile Pay"}</span>
+                  </button>
+                  {cashAllowed && (
+                    <button
+                      onClick={() => setPaymentMethod("cash")}
+                      className={`flex flex-col items-center gap-2 h-20 rounded-xl transition-all duration-200 ${
+                        paymentMethod === "cash"
+                          ? 'bg-[#8B1A1A] text-white ring-2 ring-[#8B1A1A]'
+                          : d ? 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] ring-1 ring-white/[0.06]' : 'bg-white text-gray-600 hover:bg-gray-50 ring-1 ring-gray-200/60 shadow-sm'
+                      }`}
+                      data-testid="button-payment-cash"
+                    >
+                      <Banknote className="h-5 w-5" />
+                      <span className="text-xs font-semibold">{language === "ar" ? "نقد" : "Cash"}</span>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-
-          {orderType === "dine_in" && tableId && (
-            <div className={`${d ? 'bg-blue-950/30 border-blue-800/30' : 'bg-blue-50 border-blue-200'} border rounded-xl p-4 text-center`}>
-              <p className={`text-sm ${d ? 'text-blue-300' : 'text-blue-700'}`}>
-                {language === "ar" ? "الدفع يكون بعد ما تخلص أكلك - من الكاشير أو من جوالك" : "Pay after you finish your meal - at the cashier or from your phone"}
-              </p>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Order Summary - in scrollable area */}
           <div className="space-y-3">
-            <h2 className={`font-bold text-sm ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wider`}>{language === "ar" ? "ملخص الطلب" : "Order Summary"}</h2>
+            <h2 className={`text-[11px] font-bold ${d ? 'text-white/45' : 'text-gray-400'} uppercase tracking-[0.12em]`}>{language === "ar" ? "ملخص الطلب" : "Order Summary"}</h2>
             <div className={`${d ? 'bg-white/[0.03] border-white/[0.06]' : 'bg-white border-gray-200/60 shadow-sm'} rounded-2xl border p-4 space-y-2.5 text-sm`}>
               <div className={`flex justify-between ${d ? 'text-white/50' : 'text-gray-500'}`}>
                 <span>{t("subtotal")}</span>
@@ -1277,24 +1374,26 @@ export default function CustomerMenuPage() {
           )}
         </main>
 
-        {/* Slim fixed bottom bar - just total + button */}
-        <div className={`fixed bottom-0 left-0 right-0 z-20 ${d ? 'bg-[#111]/95 border-white/[0.04]' : 'bg-white/95 border-gray-100'} backdrop-blur-xl border-t`}>
-          <div className="max-w-lg mx-auto px-4 py-3.5 flex items-center gap-3">
-            <div className="flex-1 min-w-0">
-              <p className={`text-[11px] font-medium ${d ? 'text-white/35' : 'text-gray-400'}`}>{t("total")}</p>
-              <p className="text-xl font-bold text-[#8B1A1A] tabular-nums leading-tight">
+        {/* Bottom bar - total + place order */}
+        <div className={`fixed bottom-0 left-0 right-0 z-20 ${d ? 'bg-[#111]/97 border-white/[0.05]' : 'bg-white/97 border-gray-100'} backdrop-blur-xl border-t`}>
+          <div className="max-w-lg mx-auto px-4 py-3 flex items-center gap-3">
+            <div className={`flex-shrink-0 ${d ? 'bg-white/[0.04] border-white/[0.06]' : 'bg-gray-50 border-gray-200/60'} border rounded-xl px-3.5 py-2`}>
+              <p className={`text-[10px] font-medium ${d ? 'text-white/35' : 'text-gray-400'} mb-0`}>{t("total")}</p>
+              <p className="text-[18px] font-bold text-[#8B1A1A] tabular-nums leading-tight">
                 {depositInfo?.hasDeposit
                   ? Math.max(0, totalWithTax - parseFloat(depositInfo.depositAmount)).toFixed(2)
-                  : totalWithTax.toFixed(2)} <span className={`text-[10px] font-normal ${d ? 'text-white/25' : 'text-gray-300'}`}>{t("sar")}</span>
+                  : totalWithTax.toFixed(2)} <span className={`text-[10px] font-normal ${d ? 'text-white/25' : 'text-gray-400'}`}>{t("sar")}</span>
               </p>
             </div>
             <button
               data-testid="button-place-order"
-              className="flex-1 h-12 bg-[#8B1A1A] hover:bg-[#A02020] disabled:opacity-40 text-white rounded-xl text-sm font-bold transition-colors active:scale-[0.98]"
+              className="flex-1 h-[52px] bg-[#8B1A1A] hover:bg-[#9e1f1f] disabled:opacity-40 text-white rounded-2xl text-[15px] font-bold transition-all active:scale-[0.98] shadow-sm"
               onClick={handlePlaceOrder}
               disabled={placeOrderMutation.isPending || cart.length === 0 || !canOrder}
             >
-              {placeOrderMutation.isPending ? "..." : (orderType === "dine_in" && tableId) ? (language === "ar" ? "أرسل للمطبخ" : "Send to Kitchen") : t("confirmOrder")}
+              {placeOrderMutation.isPending ? (
+                <Loader2 className="h-5 w-5 animate-spin mx-auto" />
+              ) : (orderType === "dine_in" && tableId) ? (language === "ar" ? "أرسل للمطبخ" : "Send to Kitchen") : t("confirmOrder")}
             </button>
           </div>
         </div>
@@ -1385,15 +1484,16 @@ export default function CustomerMenuPage() {
 
   return (
     <div className={`min-h-screen ${d ? 'bg-[#111]' : 'bg-gray-50'}`} dir={direction}>
-      {/* Compact Hero Banner */}
+      {/* Hero Banner */}
       <div className="relative">
         {restaurant?.banner ? (
-          <div className="h-36 sm:h-44 w-full overflow-hidden">
-            <img src={restaurant.banner} alt="" className="w-full h-full object-cover" />
-            <div className={`absolute inset-0 ${d ? 'bg-gradient-to-b from-black/50 to-[#111]' : 'bg-gradient-to-b from-black/30 to-gray-50'}`} />
+          <div className="h-40 sm:h-52 w-full overflow-hidden">
+            <img src={restaurant.banner} alt="" className="w-full h-full object-cover scale-105" />
+            <div className={`absolute inset-0 ${d ? 'bg-gradient-to-b from-black/40 via-black/10 to-[#111]' : 'bg-gradient-to-b from-black/25 via-transparent to-gray-50'}`} />
           </div>
         ) : (
-          <div className={`h-28 sm:h-36 w-full ${d ? 'bg-[#1a1a1a]' : 'bg-[#8B1A1A]'}`}>
+          <div className={`h-32 sm:h-40 w-full ${d ? 'bg-[#1a1a1a]' : 'bg-[#8B1A1A]'} relative overflow-hidden`}>
+            <div className={`absolute inset-0 ${d ? 'bg-gradient-to-br from-[#8B1A1A]/30 to-transparent' : 'bg-gradient-to-br from-white/10 to-transparent'}`} />
             <div className={`absolute inset-0 ${d ? 'bg-gradient-to-b from-transparent to-[#111]' : 'bg-gradient-to-b from-transparent to-gray-50'}`} />
           </div>
         )}
@@ -1436,62 +1536,155 @@ export default function CustomerMenuPage() {
       </div>
 
       {/* Restaurant Info Card */}
-      <div className="max-w-lg mx-auto px-4 -mt-10 relative z-10">
-        <div className={`${d ? 'bg-[#1a1a1a] border-white/[0.06]' : 'bg-white border-gray-100 shadow-sm'} border rounded-xl p-3.5 flex items-center gap-3`}>
+      <div className="max-w-lg mx-auto px-4 -mt-12 relative z-10">
+        <div className={`${d ? 'bg-[#1a1a1a] border-white/[0.07]' : 'bg-white border-gray-100/80'} border rounded-2xl p-4 shadow-xl flex items-start gap-4`}>
           {restaurant?.logo ? (
-            <div className={`w-14 h-14 rounded-xl overflow-hidden flex-shrink-0 ${d ? 'bg-[#222]' : 'bg-gray-50'}`}>
+            <div className={`w-16 h-16 rounded-xl overflow-hidden flex-shrink-0 ${d ? 'bg-[#222] ring-2 ring-white/[0.06]' : 'bg-gray-50 ring-2 ring-gray-100'} shadow-lg`}>
               <img src={restaurant.logo} alt="" className="w-full h-full object-cover" />
             </div>
           ) : (
-            <div className="w-14 h-14 rounded-xl flex-shrink-0 bg-[#8B1A1A] flex items-center justify-center">
-              <UtensilsCrossed className="h-5 w-5 text-white/90" />
+            <div className="w-16 h-16 rounded-xl flex-shrink-0 bg-[#8B1A1A] flex items-center justify-center shadow-lg ring-2 ring-[#8B1A1A]/30">
+              <UtensilsCrossed className="h-6 w-6 text-white/90" />
             </div>
           )}
-          <div className="flex-1 min-w-0">
-            <h1 className={`text-base font-bold ${d ? 'text-white' : 'text-gray-900'} truncate`} data-testid="text-restaurant-name">
+          <div className="flex-1 min-w-0 pt-0.5">
+            <h1 className={`text-[17px] font-bold ${d ? 'text-white' : 'text-gray-900'} truncate leading-tight`} data-testid="text-restaurant-name">
               {getLocalizedName(restaurant?.nameEn, restaurant?.nameAr) || "Restaurant"}
             </h1>
-            <div className="flex items-center gap-2 mt-0.5">
+            <div className="flex items-center flex-wrap gap-2 mt-1.5">
               {table && (
-                <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium ${d ? 'text-[#e88]' : 'text-[#8B1A1A]'}`} data-testid="badge-table-number">
+                <span className={`inline-flex items-center gap-1 text-[11px] font-semibold ${d ? 'text-[#e88]' : 'text-[#8B1A1A]'} ${d ? 'bg-[#8B1A1A]/10' : 'bg-[#8B1A1A]/8'} px-2 py-0.5 rounded-full`} data-testid="badge-table-number">
                   <MapPin className="h-2.5 w-2.5" />
                   {t("youAreAtTable")} {table.tableNumber}
                 </span>
               )}
               {restaurant?.openingTime && restaurant?.closingTime && (
-                <span className={`inline-flex items-center gap-0.5 text-[10px] ${d ? 'text-white/30' : 'text-gray-400'}`}>
+                <span className={`inline-flex items-center gap-1 text-[11px] ${d ? 'text-white/35' : 'text-gray-400'}`}>
                   <Clock className="h-2.5 w-2.5" />
-                  {restaurant.openingTime} - {restaurant.closingTime}
+                  {restaurant.openingTime} – {restaurant.closingTime}
                 </span>
               )}
             </div>
+            {(restaurant?.phone || restaurant?.whatsapp || restaurant?.address) && (
+              <div className="flex items-center flex-wrap gap-2 mt-2">
+                {restaurant?.phone && (
+                  <a
+                    href={`tel:${restaurant.phone}`}
+                    className={`inline-flex items-center gap-1 text-[11px] font-medium ${d ? 'text-white/45 hover:text-white/75' : 'text-gray-500 hover:text-gray-800'} transition-colors`}
+                  >
+                    <Phone className="h-2.5 w-2.5" />
+                    {restaurant.phone}
+                  </a>
+                )}
+                {restaurant?.whatsapp && (
+                  <a
+                    href={`https://wa.me/${restaurant.whatsapp.replace(/\D/g, '')}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`inline-flex items-center gap-1 text-[11px] font-medium ${d ? 'text-green-400/70 hover:text-green-400' : 'text-green-600 hover:text-green-700'} transition-colors`}
+                  >
+                    <Smartphone className="h-2.5 w-2.5" />
+                    WhatsApp
+                  </a>
+                )}
+                {restaurant?.address && (
+                  <span className={`inline-flex items-center gap-1 text-[11px] ${d ? 'text-white/30' : 'text-gray-400'}`}>
+                    <MapPin className="h-2.5 w-2.5" />
+                    {restaurant.address}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Social Media Links */}
+        {(restaurant?.socialInstagram || restaurant?.socialTwitter || restaurant?.socialTiktok || restaurant?.socialSnapchat || restaurant?.socialFacebook) && (
+          <div className={`mt-2 flex items-center gap-2 flex-wrap`}>
+            {restaurant?.socialInstagram && (
+              <a
+                href={`https://instagram.com/${restaurant.socialInstagram.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.1] hover:text-white/80' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800'} transition-colors`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg>
+                @{restaurant.socialInstagram.replace('@','')}
+              </a>
+            )}
+            {restaurant?.socialTwitter && (
+              <a
+                href={`https://x.com/${restaurant.socialTwitter.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.1] hover:text-white/80' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800'} transition-colors`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                @{restaurant.socialTwitter.replace('@','')}
+              </a>
+            )}
+            {restaurant?.socialTiktok && (
+              <a
+                href={`https://tiktok.com/@${restaurant.socialTiktok.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.1] hover:text-white/80' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800'} transition-colors`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.69a8.27 8.27 0 004.84 1.56V6.79a4.85 4.85 0 01-1.07-.1z"/></svg>
+                @{restaurant.socialTiktok.replace('@','')}
+              </a>
+            )}
+            {restaurant?.socialSnapchat && (
+              <a
+                href={`https://snapchat.com/add/${restaurant.socialSnapchat.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.1] hover:text-white/80' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800'} transition-colors`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M12.206.793c.99 0 4.347.276 5.93 3.821.529 1.193.403 3.219.299 4.847l-.003.06c-.012.18-.022.345-.03.51.075.045.203.09.401.09.3-.016.659-.12.922-.271.143-.082.291-.123.437-.123.259 0 .5.1.678.285.178.186.264.439.237.7-.073.568-.582.884-1.105 1.066-.209.073-.426.127-.59.178-.241.073-.448.135-.61.207-.31.137-.497.346-.592.58-.097.249-.094.562-.089.875v.033c.022.601.07 1.215.331 1.756.264.557.704.964 1.378 1.285.342.16.704.283 1.069.396.229.07.455.138.671.216.402.147.635.326.745.543.113.223.053.489-.084.694-.21.316-.58.534-1.141.63-.56.097-1.25.089-1.983-.041-.358-.063-.89-.195-1.364-.316-.326-.083-.64-.163-.877-.2-.149-.023-.32.005-.537.056.068 1.159.197 2.362-.133 3.364-.401 1.215-1.198 2.207-2.364 2.946C14.675 23.594 13.454 24 12.19 24c-1.264 0-2.485-.406-3.626-1.208-1.166-.739-1.963-1.731-2.364-2.946-.33-1.002-.199-2.205-.131-3.364a2.268 2.268 0 00-.542-.059l-.074.008c-.236.036-.544.113-.864.194-.474.121-1.009.253-1.369.316-.728.131-1.419.138-1.978.042-.561-.097-.931-.315-1.141-.63-.138-.207-.197-.472-.084-.695.11-.218.343-.396.745-.543.218-.078.444-.146.672-.216.367-.113.728-.236 1.071-.397.674-.32 1.114-.727 1.378-1.284.263-.545.31-1.16.332-1.768v-.022c.004-.251.005-.504-.003-.75-.008-.234-.088-.543-.294-.797-.155-.191-.389-.344-.638-.45-.162-.072-.369-.134-.61-.208-.164-.05-.381-.105-.59-.177-.523-.183-1.032-.499-1.105-1.067-.026-.261.059-.514.237-.7.178-.186.419-.284.678-.284.146 0 .294.04.437.122.263.152.622.287.922.272.195 0 .325-.046.401-.091-.008-.165-.018-.33-.03-.51l-.003-.06c-.104-1.628-.23-3.654.299-4.847C6.86 1.069 10.216.793 11.206.793h1z"/></svg>
+                @{restaurant.socialSnapchat.replace('@','')}
+              </a>
+            )}
+            {restaurant?.socialFacebook && (
+              <a
+                href={`https://facebook.com/${restaurant.socialFacebook.replace('@','')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.1] hover:text-white/80' : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800'} transition-colors`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+                {restaurant.socialFacebook.replace('@','')}
+              </a>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Search & Category tabs - sticky */}
-      <div className={`sticky top-0 z-20 ${d ? 'bg-[#111]/95' : 'bg-gray-50/95'} backdrop-blur-xl border-b ${d ? 'border-white/[0.04]' : 'border-gray-200/60'}`}>
-        <div className="max-w-lg mx-auto px-4 pt-3 pb-2">
+      <div className={`sticky top-0 z-20 ${d ? 'bg-[#111]/96' : 'bg-gray-50/96'} backdrop-blur-xl border-b ${d ? 'border-white/[0.05]' : 'border-gray-200/70'}`}>
+        <div className="max-w-lg mx-auto px-4 pt-3 pb-2.5">
           <div className="relative">
-            <Search className={`absolute ${direction === 'rtl' ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 h-4 w-4 ${d ? 'text-white/20' : 'text-gray-300'}`} />
+            <Search className={`absolute ${direction === 'rtl' ? 'right-3.5' : 'left-3.5'} top-1/2 -translate-y-1/2 h-4 w-4 ${d ? 'text-white/25' : 'text-gray-400'}`} />
             <Input
               placeholder={t("searchMenu")}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className={`${direction === 'rtl' ? 'pr-10' : 'pl-10'} h-10 rounded-lg border-0 ${d ? 'bg-white/[0.06] text-white placeholder:text-white/20 focus:bg-white/[0.08]' : 'bg-white text-gray-900 placeholder:text-gray-400 ring-1 ring-gray-200/80 focus:ring-gray-300'} text-sm`}
+              className={`${direction === 'rtl' ? 'pr-10' : 'pl-10'} h-11 rounded-xl border-0 ${d ? 'bg-white/[0.07] text-white placeholder:text-white/25 ring-1 ring-white/[0.07] focus:bg-white/[0.09] focus:ring-white/10' : 'bg-white text-gray-900 placeholder:text-gray-400 ring-1 ring-gray-200 shadow-sm focus:ring-[#8B1A1A]/30'} text-sm transition-all`}
               data-testid="input-search-menu"
             />
             {searchQuery && (
-              <Button variant="ghost" size="icon" className={`absolute ${direction === 'rtl' ? 'left-1' : 'right-1'} top-1/2 -translate-y-1/2 h-7 w-7 rounded-full ${d ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} onClick={() => setSearchQuery("")}>
+              <Button variant="ghost" size="icon" className={`absolute ${direction === 'rtl' ? 'left-1.5' : 'right-1.5'} top-1/2 -translate-y-1/2 h-7 w-7 rounded-full ${d ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`} onClick={() => setSearchQuery("")}>
                 <X className={`h-3.5 w-3.5 ${d ? 'text-white/40' : 'text-gray-400'}`} />
               </Button>
             )}
           </div>
         </div>
-        {/* Category tabs - underline style */}
-        <div ref={categoryTabsRef} className="max-w-lg mx-auto px-4 flex gap-0 overflow-x-auto scrollbar-hide">
+        {/* Category tabs - pill chip style */}
+        <div ref={categoryTabsRef} className="max-w-lg mx-auto px-3 pb-3 flex gap-1.5 overflow-x-auto scrollbar-hide">
           <button
-            className={`flex-shrink-0 px-3.5 pb-2.5 text-[13px] font-medium border-b-2 transition-colors ${activeCategoryId === null ? `border-[#8B1A1A] ${d ? 'text-white' : 'text-[#8B1A1A]'}` : `border-transparent ${d ? 'text-white/30 hover:text-white/50' : 'text-gray-400 hover:text-gray-600'}`}`}
+            className={`flex-shrink-0 px-3.5 h-7 rounded-full text-[12px] font-semibold whitespace-nowrap transition-all duration-200 ${activeCategoryId === null
+              ? 'bg-[#8B1A1A] text-white shadow-sm'
+              : d ? 'bg-white/[0.06] text-white/45 hover:bg-white/[0.1] hover:text-white/70 ring-1 ring-white/[0.06]' : 'bg-white text-gray-500 hover:bg-gray-100 ring-1 ring-gray-200/60 shadow-sm'}`}
             onClick={() => handleCategoryClick(null)}
             data-testid="button-category-all"
             data-tab-category="all"
@@ -1501,7 +1694,9 @@ export default function CustomerMenuPage() {
           {categories?.map((cat) => (
             <button
               key={cat.id}
-              className={`flex-shrink-0 px-3.5 pb-2.5 text-[13px] font-medium whitespace-nowrap border-b-2 transition-colors ${activeCategoryId === cat.id ? `border-[#8B1A1A] ${d ? 'text-white' : 'text-[#8B1A1A]'}` : `border-transparent ${d ? 'text-white/30 hover:text-white/50' : 'text-gray-400 hover:text-gray-600'}`}`}
+              className={`flex-shrink-0 px-3.5 h-7 rounded-full text-[12px] font-semibold whitespace-nowrap transition-all duration-200 ${activeCategoryId === cat.id
+                ? 'bg-[#8B1A1A] text-white shadow-sm'
+                : d ? 'bg-white/[0.06] text-white/45 hover:bg-white/[0.1] hover:text-white/70 ring-1 ring-white/[0.06]' : 'bg-white text-gray-500 hover:bg-gray-100 ring-1 ring-gray-200/60 shadow-sm'}`}
               onClick={() => handleCategoryClick(cat.id)}
               data-testid={`button-category-${cat.id}`}
               data-tab-category={cat.id}
@@ -1538,18 +1733,20 @@ export default function CustomerMenuPage() {
             return (
               <Fragment key={item.id}>
                 {catHeader && (
-                  <div className="pt-5 pb-1.5 first:pt-0" data-category-section={catHeader.id}>
-                    <h2 className={`text-sm font-bold ${d ? 'text-white/60' : 'text-gray-500'} uppercase tracking-wide`}>
-                      {getLocalizedName(catHeader.nameEn, catHeader.nameAr)}
-                    </h2>
+                  <div className="pt-6 pb-2 first:pt-0" data-category-section={catHeader.id}>
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-1 h-4 rounded-full bg-[#8B1A1A] flex-shrink-0" />
+                      <h2 className={`text-[13px] font-bold ${d ? 'text-white/70' : 'text-gray-600'} uppercase tracking-widest`}>
+                        {getLocalizedName(catHeader.nameEn, catHeader.nameAr)}
+                      </h2>
+                    </div>
                   </div>
                 )}
-                {/* Menu item row */}
+                {/* Menu item card */}
                 <div
-                  className={`flex gap-3 ${d ? 'bg-[#1a1a1a] border-white/[0.04]' : 'bg-white border-gray-100 shadow-sm'} border rounded-xl p-3 ${!item.isAvailable ? "opacity-30 pointer-events-none" : "cursor-pointer active:scale-[0.99]"} transition-transform`}
+                  className={`flex gap-3.5 ${d ? 'bg-[#1a1a1a] border-white/[0.05] hover:border-white/[0.09]' : 'bg-white border-gray-100/80 shadow-[0_1px_4px_rgba(0,0,0,0.06)] hover:shadow-[0_2px_10px_rgba(0,0,0,0.1)]'} border rounded-2xl p-3.5 ${!item.isAvailable ? "opacity-30 pointer-events-none" : "cursor-pointer active:scale-[0.99]"} transition-all duration-200`}
                   onClick={() => {
                     if (!item.isAvailable) return;
-                    // Store return URL with table info for item detail page
                     const currentUrl = tableId 
                       ? `/m/${restaurantId}/table/${tableId}${window.location.search}`
                       : `/m/${restaurantId}/menu`;
@@ -1559,64 +1756,80 @@ export default function CustomerMenuPage() {
                   data-testid={`card-menu-item-${item.id}`}
                 >
                   {/* Image */}
-                  <div className={`w-20 h-20 sm:w-[88px] sm:h-[88px] rounded-lg overflow-hidden flex-shrink-0 ${d ? 'bg-white/[0.04]' : 'bg-gray-100'}`}>
+                  <div className={`w-[88px] h-[88px] rounded-xl overflow-hidden flex-shrink-0 relative ${d ? 'bg-white/[0.04]' : 'bg-gray-100'}`}>
                     {item.image ? (
                       <img src={item.image} alt="" className="w-full h-full object-cover" loading="lazy" />
                     ) : (
                       <div className={`w-full h-full flex items-center justify-center ${d ? 'bg-white/[0.03]' : 'bg-gray-50'}`}>
-                        <UtensilsCrossed className={`h-5 w-5 ${d ? 'text-white/[0.08]' : 'text-gray-200'}`} />
+                        <UtensilsCrossed className={`h-6 w-6 ${d ? 'text-white/[0.08]' : 'text-gray-200'}`} />
+                      </div>
+                    )}
+                    {item.isBestseller && (
+                      <div className="absolute top-1.5 left-1.5">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${d ? 'bg-amber-500/80 text-white' : 'bg-amber-400 text-white'} shadow-sm`}>★</span>
+                      </div>
+                    )}
+                    {item.isNew && (
+                      <div className="absolute top-1.5 right-1.5">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${d ? 'bg-emerald-500/80 text-white' : 'bg-emerald-500 text-white'} shadow-sm`}>{language === "ar" ? "جديد" : "NEW"}</span>
                       </div>
                     )}
                   </div>
                   {/* Info */}
-                  <div className="flex-1 min-w-0 flex flex-col justify-between">
+                  <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
                     <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <h3 className={`font-semibold text-sm ${d ? 'text-white' : 'text-gray-900'} leading-snug line-clamp-1`} data-testid={`text-item-name-${item.id}`}>
-                          {getLocalizedName(item.nameEn, item.nameAr)}
-                        </h3>
-                        <div className="flex items-center gap-1 flex-shrink-0">
-                          {item.isNew && <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${d ? 'bg-emerald-500/15 text-emerald-400' : 'bg-emerald-50 text-emerald-600'}`}>{language === "ar" ? "جديد" : "NEW"}</span>}
-                          {item.isBestseller && <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded ${d ? 'bg-amber-500/15 text-amber-400' : 'bg-amber-50 text-amber-600'}`}>★</span>}
-                        </div>
-                      </div>
+                      <h3 className={`font-semibold text-[14px] ${d ? 'text-white' : 'text-gray-900'} leading-snug line-clamp-1`} data-testid={`text-item-name-${item.id}`}>
+                        {getLocalizedName(item.nameEn, item.nameAr)}
+                      </h3>
                       {(item.descriptionEn || item.descriptionAr) && (
-                        <p className={`text-[12px] ${d ? 'text-white/25' : 'text-gray-400'} mt-0.5 line-clamp-2 leading-snug`}>
+                        <p className={`text-[11.5px] ${d ? 'text-white/30' : 'text-gray-400'} mt-0.5 line-clamp-2 leading-relaxed`}>
                           {getLocalizedName(item.descriptionEn || "", item.descriptionAr || "")}
                         </p>
                       )}
                       {(item.isSpicy || item.isVegetarian || item.calories) && (
-                        <div className="flex items-center gap-1.5 mt-1">
-                          {item.isSpicy && <Flame className={`h-3 w-3 ${d ? 'text-red-400/60' : 'text-red-400'}`} />}
-                          {item.isVegetarian && <Leaf className={`h-3 w-3 ${d ? 'text-green-400/60' : 'text-green-500'}`} />}
-                          {item.calories && <span className={`text-[10px] ${d ? 'text-white/15' : 'text-gray-300'}`}>{item.calories} cal</span>}
+                        <div className="flex items-center gap-1.5 mt-1.5">
+                          {item.isSpicy && (
+                            <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium ${d ? 'text-red-400/70' : 'text-red-500'}`}>
+                              <Flame className="h-2.5 w-2.5" />
+                              {language === "ar" ? "حار" : "Spicy"}
+                            </span>
+                          )}
+                          {item.isVegetarian && (
+                            <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium ${d ? 'text-green-400/70' : 'text-green-600'}`}>
+                              <Leaf className="h-2.5 w-2.5" />
+                              {language === "ar" ? "نباتي" : "Veg"}
+                            </span>
+                          )}
+                          {item.calories && <span className={`text-[10px] ${d ? 'text-white/20' : 'text-gray-300'}`}>{item.calories} cal</span>}
                         </div>
                       )}
                     </div>
-                    <div className="flex items-center justify-between mt-1.5">
-                      <p className={`font-bold text-sm ${d ? 'text-white' : 'text-gray-900'} tabular-nums`} data-testid={`text-item-price-${item.id}`}>
-                        {hasVariants && <span className={`text-[10px] font-normal ${d ? 'text-white/25' : 'text-gray-400'}`}>{language === "ar" ? "من " : "From "}</span>}
-                        {parseFloat(item.price).toFixed(2)}
-                        <span className={`text-[10px] font-normal ${d ? 'text-white/20' : 'text-gray-300'} ${direction === 'rtl' ? 'mr-0.5' : 'ml-0.5'}`}>{t("sar")}</span>
-                      </p>
+                    <div className="flex items-center justify-between mt-2">
+                      <div>
+                        {hasVariants && <p className={`text-[10px] font-medium ${d ? 'text-white/30' : 'text-gray-400'} mb-0.5`}>{language === "ar" ? "يبدأ من" : "From"}</p>}
+                        <p className={`font-bold text-[15px] text-[#8B1A1A] tabular-nums leading-none`} data-testid={`text-item-price-${item.id}`}>
+                          {parseFloat(item.price).toFixed(2)}
+                          <span className={`text-[11px] font-normal ${d ? 'text-white/25' : 'text-gray-400'} ${direction === 'rtl' ? 'mr-0.5' : 'ml-0.5'}`}>{t("sar")}</span>
+                        </p>
+                      </div>
                       {inCart ? (
-                        <div className={`flex items-center ${d ? 'bg-white/[0.06]' : 'bg-gray-100'} rounded-full`} onClick={(e) => e.stopPropagation()}>
-                          <button className={`w-7 h-7 flex items-center justify-center rounded-full ${d ? 'text-white/50 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-200'} transition-colors`} onClick={() => updateQuantity(cart.find(c => c.menuItem.id === item.id)!.cartKey, -1)}>
+                        <div className={`flex items-center gap-0.5 ${d ? 'bg-white/[0.08] ring-1 ring-white/[0.06]' : 'bg-gray-100 ring-1 ring-gray-200/50'} rounded-xl px-1`} onClick={(e) => e.stopPropagation()}>
+                          <button className={`w-7 h-7 flex items-center justify-center rounded-lg ${d ? 'text-white/50 hover:text-white hover:bg-white/10' : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200'} transition-colors`} onClick={() => updateQuantity(cart.find(c => c.menuItem.id === item.id)!.cartKey, -1)}>
                             <Minus className="h-3 w-3" />
                           </button>
-                          <span className={`w-6 text-center text-xs font-bold ${d ? 'text-white' : 'text-gray-900'} tabular-nums`}>
+                          <span className={`w-6 text-center text-[13px] font-bold ${d ? 'text-white' : 'text-gray-900'} tabular-nums`}>
                             {cart.filter(c => c.menuItem.id === item.id).reduce((s, c) => s + c.quantity, 0)}
                           </span>
-                          <button className={`w-7 h-7 flex items-center justify-center rounded-full ${d ? 'text-white/50 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-200'} transition-colors`} onClick={() => updateQuantity(cart.find(c => c.menuItem.id === item.id)!.cartKey, 1)}>
+                          <button className={`w-7 h-7 flex items-center justify-center rounded-lg ${d ? 'text-white/50 hover:text-white hover:bg-white/10' : 'text-gray-500 hover:text-gray-800 hover:bg-gray-200'} transition-colors`} onClick={() => updateQuantity(cart.find(c => c.menuItem.id === item.id)!.cartKey, 1)}>
                             <Plus className="h-3 w-3" />
                           </button>
                         </div>
                       ) : item.isAvailable && canOrder ? (
                         <button
-                          className={`w-7 h-7 rounded-full ${d ? 'bg-white text-[#111]' : 'bg-[#8B1A1A] text-white'} flex items-center justify-center transition-transform active:scale-90`}
+                          className={`w-8 h-8 rounded-xl ${d ? 'bg-white/90 text-[#111] hover:bg-white' : 'bg-[#8B1A1A] text-white hover:bg-[#9e1f1f]'} flex items-center justify-center transition-all active:scale-90 shadow-sm`}
                           onClick={(e) => { e.stopPropagation(); addToCart(item); }}
                         >
-                          <Plus className="h-3.5 w-3.5" strokeWidth={2.5} />
+                          <Plus className="h-4 w-4" strokeWidth={2.5} />
                         </button>
                       ) : null}
                     </div>
@@ -1628,9 +1841,16 @@ export default function CustomerMenuPage() {
         </div>
 
         {filteredItems?.length === 0 && (
-          <div className="text-center py-16" data-testid="empty-menu-state">
-            <Search className={`h-8 w-8 mx-auto mb-3 ${d ? 'text-white/10' : 'text-gray-200'}`} />
-            <p className={`${d ? 'text-white/30' : 'text-gray-400'} text-sm`} data-testid="text-no-items">{t("noItems")}</p>
+          <div className="text-center py-20" data-testid="empty-menu-state">
+            <div className={`w-16 h-16 rounded-2xl ${d ? 'bg-white/[0.04]' : 'bg-gray-100'} flex items-center justify-center mx-auto mb-4`}>
+              <Search className={`h-7 w-7 ${d ? 'text-white/15' : 'text-gray-300'}`} />
+            </div>
+            <p className={`${d ? 'text-white/40' : 'text-gray-400'} text-[14px] font-medium`} data-testid="text-no-items">{t("noItems")}</p>
+            {searchQuery && (
+              <button onClick={() => setSearchQuery("")} className={`mt-3 text-[12px] font-semibold ${d ? 'text-white/30 hover:text-white/50' : 'text-gray-400 hover:text-gray-600'} transition-colors`}>
+                {language === "ar" ? "مسح البحث" : "Clear search"}
+              </button>
+            )}
           </div>
         )}
       </main>
@@ -1642,21 +1862,22 @@ export default function CustomerMenuPage() {
             <button
               onClick={() => canOrder && setShowCheckout(true)}
               disabled={!canOrder}
-              className={`w-full ${d ? 'bg-white text-[#111] disabled:bg-white/20 disabled:text-white/30' : 'bg-[#8B1A1A] text-white disabled:bg-gray-300 disabled:text-gray-500'} rounded-xl h-14 px-4 flex items-center justify-between shadow-lg transition-colors active:scale-[0.98]`}
+              className={`w-full ${d ? 'bg-white text-[#111] disabled:bg-white/20 disabled:text-white/30' : 'bg-[#8B1A1A] text-white disabled:bg-gray-300 disabled:text-gray-500'} rounded-2xl h-[60px] px-5 flex items-center justify-between shadow-xl transition-all active:scale-[0.98]`}
               data-testid="button-checkout"
             >
-              <div className="flex items-center gap-2.5">
-                <div className={`w-8 h-8 rounded-lg ${d ? 'bg-[#111]/10' : 'bg-white/20'} flex items-center justify-center relative`}>
-                  <ShoppingCart className="h-4 w-4" />
-                  <span className={`absolute -top-1 -right-1 h-4 min-w-[16px] px-0.5 ${d ? 'bg-[#8B1A1A] text-white' : 'bg-white text-[#8B1A1A]'} rounded-full text-[9px] font-bold flex items-center justify-center`} data-testid="badge-cart-count">
+              <div className="flex items-center gap-3">
+                <div className={`w-9 h-9 rounded-xl ${d ? 'bg-[#111]/15' : 'bg-white/20'} flex items-center justify-center relative`}>
+                  <ShoppingCart className="h-[18px] w-[18px]" />
+                  <span className={`absolute -top-1 ${direction === 'rtl' ? '-left-1' : '-right-1'} h-4.5 min-w-[18px] w-[18px] px-0 ${d ? 'bg-[#8B1A1A] text-white' : 'bg-white text-[#8B1A1A]'} rounded-full text-[9px] font-bold flex items-center justify-center`} data-testid="badge-cart-count">
                     {cart.reduce((sum, item) => sum + item.quantity, 0)}
                   </span>
                 </div>
-                <span className="font-semibold text-sm">{t("checkout")}</span>
+                <span className="font-bold text-[15px]">{t("checkout")}</span>
               </div>
-              <span className="font-bold text-base tabular-nums" data-testid="text-cart-total">
-                {totalWithTax.toFixed(2)} <span className="text-xs font-normal opacity-60">{t("sar")}</span>
-              </span>
+              <div className="flex items-baseline gap-1">
+                <span className="font-bold text-[18px] tabular-nums leading-none" data-testid="text-cart-total">{totalWithTax.toFixed(2)}</span>
+                <span className="text-[11px] font-normal opacity-70">{t("sar")}</span>
+              </div>
             </button>
           </div>
         </div>
@@ -1736,17 +1957,19 @@ export default function CustomerMenuPage() {
 
                 <div className="p-5 sm:p-6 space-y-5">
                   <div>
-                    <h2 className={`text-xl sm:text-2xl font-bold ${d ? 'text-white' : 'text-gray-900'}`}>{getLocalizedName(item.nameEn, item.nameAr)}</h2>
+                    <h2 className={`text-[22px] sm:text-2xl font-bold ${d ? 'text-white' : 'text-gray-900'} leading-snug`}>{getLocalizedName(item.nameEn, item.nameAr)}</h2>
                     {(item.descriptionEn || item.descriptionAr) && (
-                      <p className={`text-sm ${d ? 'text-white/40' : 'text-gray-500'} mt-1.5 leading-relaxed`}>{getLocalizedName(item.descriptionEn || "", item.descriptionAr || "")}</p>
+                      <p className={`text-[13px] ${d ? 'text-white/40' : 'text-gray-500'} mt-1.5 leading-relaxed`}>{getLocalizedName(item.descriptionEn || "", item.descriptionAr || "")}</p>
                     )}
-                    <p className={`text-xl font-bold ${d ? 'text-white' : 'text-gray-900'} mt-3`}>
-                      {(basePrice + variantAdj + custAdj).toFixed(2)} <span className={`text-sm font-medium ${d ? 'text-white/40' : 'text-gray-400'}`}>{t("sar")}</span>
-                    </p>
-                    <div className="flex gap-2 mt-3">
-                      {item.isSpicy && <Badge variant="outline" className="text-red-400 border-red-800/50 bg-red-950/30 rounded-lg"><Flame className="h-3 w-3 mr-1" />{language === "ar" ? "حار" : "Spicy"}</Badge>}
-                      {item.isVegetarian && <Badge variant="outline" className="text-green-400 border-green-800/50 bg-green-950/30 rounded-lg"><Leaf className="h-3 w-3 mr-1" />{language === "ar" ? "نباتي" : "Vegetarian"}</Badge>}
-                      {item.calories && <Badge variant="outline" className={`${d ? 'text-white/50 border-white/10' : 'text-gray-500 border-gray-200'} rounded-lg`}>{item.calories} {t("calories")}</Badge>}
+                    <div className="flex items-center justify-between mt-3">
+                      <p className="text-[22px] font-bold text-[#8B1A1A] tabular-nums">
+                        {(basePrice + variantAdj + custAdj).toFixed(2)} <span className={`text-[13px] font-medium ${d ? 'text-white/40' : 'text-gray-400'}`}>{t("sar")}</span>
+                      </p>
+                      <div className="flex gap-1.5">
+                        {item.isSpicy && <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-full ${d ? 'bg-red-950/40 text-red-400 border border-red-800/30' : 'bg-red-50 text-red-500 border border-red-100'}`}><Flame className="h-3 w-3" />{language === "ar" ? "حار" : "Spicy"}</span>}
+                        {item.isVegetarian && <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-full ${d ? 'bg-green-950/40 text-green-400 border border-green-800/30' : 'bg-green-50 text-green-600 border border-green-100'}`}><Leaf className="h-3 w-3" />{language === "ar" ? "نباتي" : "Veg"}</span>}
+                        {item.calories && <span className={`text-[11px] font-medium px-2.5 py-1 rounded-full ${d ? 'bg-white/[0.04] text-white/40 border border-white/[0.07]' : 'bg-gray-50 text-gray-400 border border-gray-100'}`}>{item.calories} cal</span>}
+                      </div>
                     </div>
                   </div>
 
@@ -1902,22 +2125,24 @@ export default function CustomerMenuPage() {
                   ))}
 
                   {/* Quantity & Add to Cart */}
-                  <div className={`flex items-center justify-between pt-5 border-t ${d ? 'border-white/10' : 'border-gray-200'}`}>
-                    <div className={`flex items-center gap-1 ${d ? 'bg-white/5' : 'bg-gray-100'} rounded-xl p-1`}>
-                      <Button size="icon" variant="ghost" className={`h-10 w-10 rounded-lg ${d ? 'hover:bg-white/10 text-white' : 'hover:bg-gray-200 text-gray-900'}`} onClick={() => setDetailQuantity(Math.max(1, detailQuantity - 1))}>
+                  <div className={`flex items-center gap-3 pt-5 border-t ${d ? 'border-white/10' : 'border-gray-200'}`}>
+                    <div className={`flex items-center gap-1 ${d ? 'bg-white/[0.06] ring-1 ring-white/[0.08]' : 'bg-gray-100 ring-1 ring-gray-200/60'} rounded-xl p-1`}>
+                      <Button size="icon" variant="ghost" className={`h-10 w-10 rounded-lg ${d ? 'hover:bg-white/10 text-white/80' : 'hover:bg-gray-200 text-gray-700'}`} onClick={() => setDetailQuantity(Math.max(1, detailQuantity - 1))}>
                         <Minus className="h-4 w-4" />
                       </Button>
                       <span className={`text-lg font-bold w-10 text-center tabular-nums ${d ? 'text-white' : 'text-gray-900'}`}>{detailQuantity}</span>
-                      <Button size="icon" variant="ghost" className={`h-10 w-10 rounded-lg ${d ? 'hover:bg-white/10 text-white' : 'hover:bg-gray-200 text-gray-900'}`} onClick={() => setDetailQuantity(detailQuantity + 1)}>
+                      <Button size="icon" variant="ghost" className={`h-10 w-10 rounded-lg ${d ? 'hover:bg-white/10 text-white/80' : 'hover:bg-gray-200 text-gray-700'}`} onClick={() => setDetailQuantity(detailQuantity + 1)}>
                         <Plus className="h-4 w-4" />
                       </Button>
                     </div>
                     <Button
-                      className="gap-2 bg-[#8B1A1A] hover:bg-[#A02020] text-white min-w-[160px] h-12 rounded-xl shadow-lg shadow-[#8B1A1A]/25 text-[15px] font-bold border-0"
+                      className="flex-1 gap-2.5 bg-[#8B1A1A] hover:bg-[#9e1f1f] text-white h-12 rounded-xl shadow-md text-[15px] font-bold border-0 active:scale-[0.98] transition-all"
                       onClick={addToCartFromDetail}
                     >
                       <ShoppingCart className="h-4 w-4" />
-                      {language === "ar" ? "أضف" : "Add"} · {totalPrice.toFixed(2)} {t("sar")}
+                      <span>
+                        {language === "ar" ? "أضف للسلة" : "Add to Cart"} · {totalPrice.toFixed(2)} <span className="text-[11px] font-normal opacity-70">{t("sar")}</span>
+                      </span>
                     </Button>
                   </div>
                 </div>
