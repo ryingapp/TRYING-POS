@@ -8847,15 +8847,16 @@ export async function registerRoutes(
         branchId,
       );
       if (existingSession) {
-        return res
-          .status(400)
-          .json({ error: "يوجد يوم مفتوح بالفعل. يرجى إغلاقه أولاً." });
+        // Return the existing open session so the client can resume it
+        return res.status(200).json(existingSession);
       }
 
+      const today = new Date().toISOString().split('T')[0];
       const data = insertDaySessionSchema.parse({
         ...req.body,
         restaurantId: await getRestaurantId(req),
         branchId: branchId || undefined,
+        date: today,
       });
 
       const session = await storage.openDaySession(data);
