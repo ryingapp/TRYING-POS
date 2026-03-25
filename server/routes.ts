@@ -69,6 +69,33 @@ function signToken(payload: { userId: string; restaurantId: string }): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 }
 
+// In-memory login rate limiter (prevents brute-force attacks)
+// Only counts FAILED attempts — successful logins reset the counter
+const _loginAttempts = new Map<string, { count: number; firstAttempt: number }>();
+const _LOGIN_RATE_LIMIT = 10; // max failed attempts per window
+const _LOGIN_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+function isLoginRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const entry = _loginAttempts.get(ip);
+  if (!entry || now - entry.firstAttempt > _LOGIN_WINDOW_MS) return false;
+  return entry.count >= _LOGIN_RATE_LIMIT;
+}
+
+function recordFailedLogin(ip: string): void {
+  const now = Date.now();
+  const entry = _loginAttempts.get(ip);
+  if (!entry || now - entry.firstAttempt > _LOGIN_WINDOW_MS) {
+    _loginAttempts.set(ip, { count: 1, firstAttempt: now });
+  } else {
+    entry.count++;
+  }
+}
+
+function resetLoginAttempts(ip: string): void {
+  _loginAttempts.delete(ip);
+}
+
 function verifyToken(token: string): { userId: string; restaurantId: string } {
   return jwt.verify(token, JWT_SECRET) as {
     userId: string;
@@ -1169,6 +1196,21 @@ export async function registerRoutes(
     });
   });
 
+  // Mobile app version check — no auth required
+  // Update MIN_APP_VERSION here to force users to update the app
+  app.get("/api/app-version", (_req, res) => {
+    const MIN_APP_VERSION = process.env.MIN_APP_VERSION || "1.0.0";
+    const LATEST_APP_VERSION = process.env.LATEST_APP_VERSION || "1.0.0";
+    const STORE_URL_ANDROID = process.env.APP_STORE_URL_ANDROID || "https://play.google.com/store/apps/details?id=com.tryingpos.app";
+    const STORE_URL_IOS = process.env.APP_STORE_URL_IOS || "https://apps.apple.com/app/tryingpos/id0000000000";
+    res.json({
+      minVersion: MIN_APP_VERSION,
+      latestVersion: LATEST_APP_VERSION,
+      storeUrlAndroid: STORE_URL_ANDROID,
+      storeUrlIos: STORE_URL_IOS,
+    });
+  });
+
   // RBAC permission middleware for protected routes
   const ROUTE_PERMISSIONS: Array<{
     pattern: RegExp;
@@ -1663,6 +1705,19 @@ export async function registerRoutes(
         });
       }
 
+      // Block cash payment if restaurant has disabled it for public QR orders
+      // Exception: dine_in table orders use "cash" as a placeholder — real payment
+      // is collected via edfapay AFTER kitchen marks the order ready (triggered from
+      // the active-order view on the QR page, not at order-placement time).
+      const isTableQrOrder = req.body.orderType === "dine_in" && !!req.body.tableId;
+      if (req.body.paymentMethod === "cash" && (restaurant as any).allowCashOnPublicQR === false && !isTableQrOrder) {
+        return res.status(400).json({
+          error: "cashNotAllowed",
+          message: "Cash payment is not accepted for online orders at this restaurant",
+          messageAr: "الدفع النقدي غير مقبول للطلبات الإلكترونية في هذا المطعم",
+        });
+      }
+
       // Server-side price recalculation for public orders (CRITICAL - prevents price tampering)
       let serverTotals: {
         subtotal: string;
@@ -1834,34 +1889,40 @@ export async function registerRoutes(
       }
 
       if (order.customerPhone) {
-        const normalizedPhone = order.customerPhone.replace(/\s/g, "");
-        let customer = await storage.getCustomerByPhone(
-          restaurantId,
-          normalizedPhone,
-        );
-        if (customer) {
-          await storage.updateCustomer(customer.id, {
-            name: order.customerName || customer.name,
-            address: order.customerAddress || customer.address,
-            totalOrders: (customer.totalOrders || 0) + 1,
-            totalSpent: String(
-              parseFloat(customer.totalSpent || "0") +
-                parseFloat(order.total || "0"),
-            ),
-            lastOrderAt: new Date(),
-          });
-        } else {
-          customer = await storage.createCustomer({
+        try {
+          const normalizedPhone = order.customerPhone.replace(/\s/g, "");
+          let customer = await storage.getCustomerByPhone(
             restaurantId,
-            name: order.customerName || null,
-            phone: normalizedPhone,
-            address: order.customerAddress || null,
-            totalOrders: 1,
-            totalSpent: order.total || "0",
-            lastOrderAt: new Date(),
-          });
+            normalizedPhone,
+          );
+          if (customer) {
+            await storage.updateCustomer(customer.id, {
+              name: order.customerName || customer.name,
+              address: order.customerAddress || customer.address,
+              totalOrders: (customer.totalOrders || 0) + 1,
+              totalSpent: String(
+                parseFloat(customer.totalSpent || "0") +
+                  parseFloat(order.total || "0"),
+              ),
+              lastOrderAt: new Date(),
+            });
+          } else {
+            customer = await storage.createCustomer({
+              restaurantId,
+              name: order.customerName || null,
+              phone: normalizedPhone,
+              address: order.customerAddress || null,
+              totalOrders: 1,
+              totalSpent: order.total || "0",
+              lastOrderAt: new Date(),
+            });
+          }
+          if (customer?.id) {
+            await storage.updateOrder(order.id, { customerId: customer.id });
+          }
+        } catch (customerErr) {
+          console.error("Customer upsert error (non-fatal):", customerErr);
         }
-        await storage.updateOrder(order.id, { customerId: customer.id });
       }
 
       // Skip invoice and day session for payment_pending orders (will be created after payment verification)
@@ -2691,17 +2752,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Restaurant not found" });
       }
       const branchId = req.query.branch as string | undefined;
-      const waitingEntries = await storage.getQueueEntries(
-        restaurantId,
-        branchId,
-        "waiting",
-      );
+      // Count both "waiting" and "notified" — notified customers are still present and waiting to be seated
+      const waitingEntries = await storage.getQueueEntries(restaurantId, branchId, "waiting");
+      const notifiedEntries = await storage.getQueueEntries(restaurantId, branchId, "notified");
       const estimatedWait = await storage.getEstimatedWaitTime(
         restaurantId,
         branchId,
       );
       res.json({
-        waitingCount: waitingEntries.length,
+        waitingCount: waitingEntries.length + notifiedEntries.length,
         estimatedWaitMinutes: estimatedWait,
       });
     } catch (error) {
@@ -3259,6 +3318,10 @@ export async function registerRoutes(
       const body = { ...req.body };
       if (body.kitchenSectionId === "" || body.kitchenSectionId === "__none__")
         body.kitchenSectionId = null;
+      const parsedPrice = parseFloat(body.price);
+      if (isNaN(parsedPrice) || parsedPrice < 0) {
+        return res.status(400).json({ error: "السعر يجب أن يكون رقماً موجباً / Price must be a positive number" });
+      }
       const data = insertMenuItemSchema.parse({
         ...body,
         restaurantId: await getRestaurantId(req),
@@ -3366,6 +3429,11 @@ export async function registerRoutes(
         return res.status(400).json({
           error: "Missing required fields: nameEn, nameAr, categoryId, price",
         });
+      }
+
+      const parsedPrice = parseFloat(data.price);
+      if (isNaN(parsedPrice) || parsedPrice < 0) {
+        return res.status(400).json({ error: "السعر يجب أن يكون رقماً موجباً / Price must be a positive number" });
       }
 
       // Get old item to detect availability change
@@ -3548,11 +3616,16 @@ export async function registerRoutes(
   // Tables
   app.get("/api/tables", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
-      const tables = await storage.getTables(
-        await getRestaurantId(req),
-        branchId,
-      );
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId: string | undefined;
+      if (isLockedEmployee && authUser.branchId) {
+        branchId = authUser.branchId;
+      } else {
+        branchId = req.query.branch as string | undefined;
+      }
+      const tables = await storage.getTables(restaurantId, branchId);
       res.json(tables);
     } catch (error) {
       res.status(500).json({ error: "Failed to get tables" });
@@ -3753,8 +3826,21 @@ export async function registerRoutes(
   // Orders
   app.get("/api/orders", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isOwnerLike = authUser.role === "owner" || authUser.role === "platform_admin" || authUser.role === "admin";
+      // Branch isolation:
+      // - Employees (cashier/waiter/kitchen/delivery) are LOCKED to their assigned branch
+      // - Owners, admins, branch_managers can pick any branch via ?branch= query param
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId: string | undefined;
+      if (isLockedEmployee && authUser.branchId) {
+        // Employee forced to their assigned branch
+        branchId = authUser.branchId;
+      } else {
+        // Owner/admin/manager: use ?branch= from app branch picker (or no filter if not set)
+        branchId = req.query.branch as string | undefined;
+      }
       const period = (req.query.period as string) || "today"; // today, week, archived, all
 
       let orders = await storage.getOrders(
@@ -3860,7 +3946,7 @@ export async function registerRoutes(
 
       res.json(ordersWithItems);
     } catch (error) {
-      res.status(500).json({ error: "Failed to get orders" });
+      handleRouteError(res, error, "Failed to get orders");
     }
   });
 
@@ -4027,12 +4113,22 @@ export async function registerRoutes(
         }
       }
 
-      // Validate branchId exists if provided
-      let validBranchId = undefined;
+      // Validate branchId exists if provided.
+      // If not provided, fall back to the authenticated user's assigned branchId.
+      let validBranchId: string | undefined = undefined;
       if (req.body.branchId) {
-        const branches = await storage.getBranches(restaurantId);
-        const branchExists = branches.some((b) => b.id === req.body.branchId);
+        const branchList = await storage.getBranches(restaurantId);
+        const branchExists = branchList.some((b) => b.id === req.body.branchId);
         validBranchId = branchExists ? req.body.branchId : undefined;
+      }
+      // Auto-assign user's branchId when the request doesn't specify one
+      if (!validBranchId) {
+        try {
+          const authUser = await getAuthenticatedUser(req);
+          if (authUser.branchId) validBranchId = authUser.branchId;
+        } catch {
+          // Public/unauthenticated orders — branchId stays undefined
+        }
       }
 
       // Server-side price recalculation if items are provided
@@ -4646,11 +4742,17 @@ export async function registerRoutes(
   // Invoices
   app.get("/api/invoices", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId: string | undefined;
+      if (isLockedEmployee && authUser.branchId) {
+        branchId = authUser.branchId;
+      } else {
+        branchId = req.query.branch as string | undefined;
+      }
       const invoices = await storage.getInvoices(restaurantId);
-      // Filter by branch if specified
-      const result = branchId 
+      const result = branchId
         ? invoices.filter(inv => inv.branchId === branchId)
         : invoices;
       res.json(result);
@@ -4666,7 +4768,15 @@ export async function registerRoutes(
   // Invoice search - MUST be before /api/invoices/:id to avoid "search" being matched as an ID
   app.get("/api/invoices/search", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId: string | undefined;
+      if (isLockedEmployee && authUser.branchId) {
+        branchId = authUser.branchId;
+      } else {
+        branchId = req.query.branch as string | undefined;
+      }
       const filters: any = {};
       if (req.query.invoiceNumber)
         filters.invoiceNumber = req.query.invoiceNumber as string;
@@ -4683,7 +4793,8 @@ export async function registerRoutes(
         filters.invoiceType = req.query.invoiceType as string;
 
       const results = await storage.searchInvoices(restaurantId, filters);
-      res.json(results);
+      const filtered = branchId ? results.filter((inv: any) => inv.branchId === branchId) : results;
+      res.json(filtered);
     } catch (error) {
       res.status(500).json({ error: "Failed to search invoices" });
     }
@@ -5430,8 +5541,16 @@ export async function registerRoutes(
   // Kitchen orders - get orders for kitchen display (pending, confirmed, preparing) with items
   app.get("/api/kitchen/orders", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      // Branch isolation: same logic as GET /api/orders
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId: string | undefined;
+      if (isLockedEmployee && authUser.branchId) {
+        branchId = authUser.branchId;
+      } else {
+        branchId = req.query.branch as string | undefined;
+      }
       const sectionId = req.query.section as string | undefined;
       const allOrders = await storage.getOrders(restaurantId, branchId);
 
@@ -5475,6 +5594,9 @@ export async function registerRoutes(
         if (o.orderType === 'dine_in' && o.tableId && (status === 'created' || status === 'pending')) {
           return false;
         }
+
+        // Exclude POS held orders — they are paused by cashier, not for kitchen
+        if (String(o.notes || '').includes('[HELD]')) return false;
 
         return true;
       });
@@ -5541,7 +5663,7 @@ export async function registerRoutes(
       res.json(filteredOrders);
     } catch (error) {
       console.error("[Kitchen] Error fetching orders:", error);
-      res.status(500).json({ error: "Failed to get kitchen orders" });
+      handleRouteError(res, error, "Failed to get kitchen orders");
     }
   });
 
@@ -6674,6 +6796,15 @@ export async function registerRoutes(
 
   app.post("/api/auth/login", async (req, res) => {
     try {
+      const clientIp = ((req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()) || req.ip || "unknown";
+      if (isLoginRateLimited(clientIp)) {
+        console.warn(`[AUTH] Rate limit exceeded for IP: ${clientIp}`);
+        return res.status(429).json({
+          error: "Too many login attempts. Please try again in 10 minutes.",
+          errorAr: "محاولات دخول كثيرة. حاول مرة أخرى بعد 10 دقائق.",
+        });
+      }
+
       const { email, password } = req.body;
       if (!email || !password) {
         return res
@@ -6683,10 +6814,14 @@ export async function registerRoutes(
 
       const user = await storage.getUserByEmail(email);
       if (!user) {
+        recordFailedLogin(clientIp);
+        console.warn(`[AUTH] Failed login - email not found: ${email} from IP: ${clientIp}`);
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
       if (!user.isActive) {
+        recordFailedLogin(clientIp);
+        console.warn(`[AUTH] Failed login - account disabled: ${email} from IP: ${clientIp}`);
         return res.status(401).json({ error: "Account is disabled" });
       }
 
@@ -6702,9 +6837,13 @@ export async function registerRoutes(
 
       const isValidPassword = await bcrypt.compare(password, user.password);
       if (!isValidPassword) {
+        recordFailedLogin(clientIp);
+        console.warn(`[AUTH] Failed login - wrong password for: ${email} from IP: ${clientIp} at ${new Date().toISOString()}`);
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
+      // Successful login — reset failed attempts counter
+      resetLoginAttempts(clientIp);
       await storage.updateUserLastLogin(user.id);
 
       // Generate JWT token
@@ -7580,18 +7719,19 @@ export async function registerRoutes(
   // ===============================
   app.get("/api/reservations", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
       const dateStr = req.query.date as string | undefined;
       const date = dateStr ? new Date(dateStr) : undefined;
-      const reservations = await storage.getReservations(
-        await getRestaurantId(req),
-        branchId,
-        date,
-      );
+      const reservations = await storage.getReservations(restaurantId, branchId, date);
       res.json(reservations);
     } catch (error) {
       console.error(error);
-      res.status(500).json({ error: "Failed to get reservations" });
+      handleRouteError(res, error, "Failed to get reservations");
     }
   });
 
@@ -8441,13 +8581,14 @@ export async function registerRoutes(
   // ===============================
   app.get("/api/queue", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
       const status = req.query.status as string | undefined;
-      const entries = await storage.getQueueEntries(
-        await getRestaurantId(req),
-        branchId,
-        status,
-      );
+      const entries = await storage.getQueueEntries(restaurantId, branchId, status);
       res.json(entries);
     } catch (error) {
       res.status(500).json({ error: "Failed to get queue entries" });
@@ -8456,18 +8597,21 @@ export async function registerRoutes(
 
   app.get("/api/queue/stats", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
-      const waitingEntries = await storage.getQueueEntries(
-        await getRestaurantId(req),
-        branchId,
-        "waiting",
-      );
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
+      // Count both "waiting" and "notified" so stats match what the app/web show
+      const waitingEntries = await storage.getQueueEntries(restaurantId, branchId, "waiting");
+      const notifiedEntries = await storage.getQueueEntries(restaurantId, branchId, "notified");
       const estimatedWait = await storage.getEstimatedWaitTime(
-        await getRestaurantId(req),
+        restaurantId,
         branchId,
       );
       res.json({
-        waitingCount: waitingEntries.length,
+        waitingCount: waitingEntries.length + notifiedEntries.length,
         estimatedWaitMinutes: estimatedWait,
       });
     } catch (error) {
@@ -8637,11 +8781,13 @@ export async function registerRoutes(
   // ===============================
   app.get("/api/day-sessions", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
-      const sessions = await storage.getDaySessions(
-        await getRestaurantId(req),
-        branchId,
-      );
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
+      const sessions = await storage.getDaySessions(restaurantId, branchId);
       res.json(sessions);
     } catch (error) {
       res.status(500).json({ error: "Failed to get day sessions" });
@@ -8650,11 +8796,13 @@ export async function registerRoutes(
 
   app.get("/api/day-sessions/current", async (req, res) => {
     try {
-      const branchId = req.query.branch as string | undefined;
-      const session = await storage.getCurrentDaySession(
-        await getRestaurantId(req),
-        branchId,
-      );
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
+      const session = await storage.getCurrentDaySession(restaurantId, branchId);
       res.json(session || null);
     } catch (error) {
       res.status(500).json({ error: "Failed to get current session" });
@@ -9803,12 +9951,24 @@ export async function registerRoutes(
 
       if (paymentVerified) {
         const wasPaymentPending = order.status === "payment_pending";
-        const newStatus = wasPaymentPending ? "pending" : order.status;
+        const wasReady = order.status === "ready";
+        const newStatus = wasPaymentPending ? "pending" : wasReady ? "completed" : order.status;
         await storage.updateOrder(orderId, {
           isPaid: true,
           paymentMethod: "edfapay_online",
           status: newStatus,
         });
+
+        // Free the table if the customer paid electronically from the table QR
+        if (wasReady && order.tableId) {
+          try {
+            await storage.updateTableStatus(order.tableId, "available");
+            wsManager.notifyDataChanged(order.restaurantId, "tables", "updated");
+            wsManager.notifyDataChanged(order.restaurantId, "orders", "updated");
+          } catch (e) {
+            console.error("Table status update after electronic payment error:", e);
+          }
+        }
 
         if (wasPaymentPending) {
           try {
@@ -13693,8 +13853,12 @@ export async function registerRoutes(
   // Day Sessions - Track daily operations
   app.get("/api/day-sessions", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
-      const branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
       const sessions = await storage.getDaySessions(restaurantId, branchId);
       res.json(sessions);
     } catch (error) {
@@ -13704,12 +13868,13 @@ export async function registerRoutes(
 
   app.get("/api/day-sessions/current", async (req, res) => {
     try {
-      const restaurantId = await getRestaurantId(req);
-      const branchId = req.query.branch as string | undefined;
-      const session = await storage.getCurrentDaySession(
-        restaurantId,
-        branchId,
-      );
+      const authUser = await getAuthenticatedUser(req);
+      const restaurantId = authUser.restaurantId!;
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      const branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
+      const session = await storage.getCurrentDaySession(restaurantId, branchId);
       res.json(session || { error: "No active session" });
     } catch (error) {
       res.status(500).json({ error: "Failed to get current day session" });

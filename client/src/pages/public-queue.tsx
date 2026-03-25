@@ -34,7 +34,7 @@ export default function PublicQueuePage() {
 
   const { data: queueStats, refetch: refetchStats } = useQuery<any>({
     queryKey: [`/api/public/${restaurantId}/queue/stats${branchParam ? `?branch=${branchParam}` : ""}`],
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
 
   const toggleLanguage = () => {

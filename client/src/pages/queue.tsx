@@ -36,9 +36,8 @@ interface QueueEntry {
 }
 
 interface QueueStats {
-  totalWaiting: number;
-  averageWaitTime: number;
-  nextQueueNumber: number;
+  waitingCount: number;
+  estimatedWaitMinutes: number;
 }
 
 export default function QueuePage() {
@@ -138,7 +137,23 @@ export default function QueuePage() {
       if (!response.ok) throw new Error("Failed to update status");
       return response.json();
     },
-    onSuccess: () => {
+    onMutate: async ({ id, status }) => {
+      // Cancel in-flight fetches so they don't overwrite our optimistic update
+      await queryClient.cancelQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("/api/queue") });
+      const queueKey = `/api/queue${branchParam}`;
+      const prevEntries = queryClient.getQueryData<QueueEntry[]>([queueKey]);
+      if (prevEntries) {
+        queryClient.setQueryData([queueKey], prevEntries.map((e) => e.id === id ? { ...e, status } : e));
+      }
+      return { prevEntries, queueKey };
+    },
+    onError: (_err, _vars, context) => {
+      // Revert on failure
+      if (context?.prevEntries) {
+        queryClient.setQueryData([context.queueKey], context.prevEntries);
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/queue") });
     },
   });
@@ -288,7 +303,7 @@ export default function QueuePage() {
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats?.totalWaiting || waitingEntries.length}</div>
+            <div className="text-2xl font-bold">{waitingEntries.length}</div>
           </CardContent>
         </Card>
         <Card>
@@ -300,19 +315,19 @@ export default function QueuePage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {stats?.averageWaitTime || 0} {language === "ar" ? "دقيقة" : "min"}
+              {stats?.estimatedWaitMinutes || 0} {language === "ar" ? "دقيقة" : "min"}
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">
-              {language === "ar" ? "الرقم التالي" : "Next Number"}
+              {language === "ar" ? "إجمالي اليوم" : "Total Today"}
             </CardTitle>
             <Bell className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">#{stats?.nextQueueNumber || 1}</div>
+            <div className="text-2xl font-bold">{queueEntries.length}</div>
           </CardContent>
         </Card>
       </div>
