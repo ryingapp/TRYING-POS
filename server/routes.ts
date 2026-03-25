@@ -8827,7 +8827,11 @@ export async function registerRoutes(
   app.post("/api/day-sessions/open", async (req, res) => {
     try {
       const restaurantId = await getRestaurantId(req);
-      let branchId = req.query.branch as string | undefined;
+      const authUser = await getAuthenticatedUser(req);
+      const isLockedEmployee = ["cashier", "waiter", "kitchen", "delivery"].includes(authUser.role || "");
+      let branchId = (isLockedEmployee && authUser.branchId)
+        ? authUser.branchId
+        : req.query.branch as string | undefined;
 
       // Validate branchId
       if (branchId) {

@@ -1895,21 +1895,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getCurrentDaySession(restaurantId: string, branchId?: string): Promise<DaySession | undefined> {
-    // const today = new Date().toISOString().split('T')[0];
-    
-    // Find the currently OPEN session. 
-    // We do NOT filter by date=today because a shift might run past midnight (e.g. opened yesterday).
-    const conditions = [
+    // Find the currently OPEN session.
+    // We do NOT filter by date=today because a shift might run past midnight.
+    const conditions: any[] = [
       eq(daySessions.restaurantId, restaurantId),
-      // eq(daySessions.date, today), // Removed to allow sessions spanning multiple days
       eq(daySessions.status, "open"),
     ];
-    
-    // Strict branch filter — no cross-branch fallback
+
     if (branchId) {
+      // Strict match: only return sessions for this specific branch
       conditions.push(eq(daySessions.branchId, branchId));
+    } else {
+      // No branch specified: only return sessions where branchId IS NULL
+      // (prevents a null-query from accidentally seeing another branch's open session)
+      conditions.push(isNull(daySessions.branchId));
     }
-    
+
     const [session] = await db.select().from(daySessions).where(and(...conditions));
     return session;
   }
