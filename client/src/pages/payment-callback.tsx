@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CheckCircle2, XCircle, Loader2, Globe, Printer, Download, ShoppingBag } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, Globe, Printer, Download, Star } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { apiRequest } from "@/lib/queryClient";
 import { QRCodeSVG } from "qrcode.react";
@@ -122,6 +122,11 @@ export default function PaymentCallbackPage() {
   const [message, setMessage] = useState("");
   const [invoice, setInvoice] = useState<PublicInvoice | null>(null);
   const [realOrderId, setRealOrderId] = useState<string | null>(null);
+  const [realRestaurantId, setRealRestaurantId] = useState<string | null>(null);
+  const [rating, setRating] = useState(0);
+  const [ratingHover, setRatingHover] = useState(0);
+  const [ratingSubmitted, setRatingSubmitted] = useState(false);
+  const [ratingComment, setRatingComment] = useState("");
   const printRef = useRef<HTMLDivElement>(null);
 
   const toggleLanguage = () => {
@@ -174,9 +179,10 @@ export default function PaymentCallbackPage() {
             setStatus("success");
             setMessage(language === "ar" ? "تم الدفع بنجاح" : "Payment successful");
             
-            // Store real orderId for invoice display
+            // Store real orderId + restaurantId for invoice and review
             const actualOrderId = orderData?.id || orderId;
             setRealOrderId(actualOrderId);
+            if (orderData?.restaurantId) setRealRestaurantId(orderData.restaurantId);
 
             try {
               const invoiceRes = await fetch(`/api/public/orders/${actualOrderId}/invoice`);
@@ -636,16 +642,85 @@ export default function PaymentCallbackPage() {
               </Card>
             )}
 
-            {/* Action Buttons */}
-            <Button
-              onClick={() => setLocation(`/order-status/${orderId}`)}
-              className="w-full"
-              size="lg"
-              data-testid="button-view-order-status"
-            >
-              <ShoppingBag className="h-4 w-4 me-2" />
-              {language === "ar" ? "تتبع الطلب" : "Track Order"}
-            </Button>
+            {/* Rating Section */}
+            <Card className="border-amber-200 dark:border-amber-800">
+              <CardContent className="p-5 space-y-3">
+                {ratingSubmitted ? (
+                  <div className="text-center space-y-2 py-2">
+                    <div className="text-3xl">🎉</div>
+                    <p className="font-bold text-green-700 dark:text-green-400">
+                      {language === "ar" ? "شكراً على تقييمك!" : "Thanks for your review!"}
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-center">
+                      <p className="font-bold text-base">
+                        {language === "ar" ? "كيف كانت تجربتك؟" : "How was your experience?"}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {language === "ar" ? "رأيك يهمنا" : "Your feedback matters to us"}
+                      </p>
+                    </div>
+                    {/* Stars */}
+                    <div className="flex justify-center gap-2 py-1">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          onMouseEnter={() => setRatingHover(star)}
+                          onMouseLeave={() => setRatingHover(0)}
+                          onClick={() => setRating(star)}
+                          className="transition-transform hover:scale-110"
+                          data-testid={`button-star-${star}`}
+                        >
+                          <Star
+                            className="h-9 w-9"
+                            fill={(ratingHover || rating) >= star ? "#f59e0b" : "transparent"}
+                            stroke={(ratingHover || rating) >= star ? "#f59e0b" : "#d1d5db"}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    {/* Comment box — appears after selecting a star */}
+                    {rating > 0 && (
+                      <textarea
+                        className="w-full rounded-xl border border-border bg-muted/40 text-sm p-3 resize-none focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        rows={2}
+                        placeholder={language === "ar" ? "أضف تعليقاً (اختياري)" : "Add a comment (optional)"}
+                        value={ratingComment}
+                        onChange={(e) => setRatingComment(e.target.value)}
+                      />
+                    )}
+                    <Button
+                      className="w-full bg-amber-500 hover:bg-amber-600 text-white"
+                      disabled={rating === 0}
+                      onClick={async () => {
+                        try {
+                          if (realOrderId && realRestaurantId) {
+                            await apiRequest("POST", `/api/public/${realRestaurantId}/reviews`, {
+                              orderId: realOrderId,
+                              rating,
+                              comment: ratingComment || null,
+                            }).catch(() => {});
+                          }
+                        } finally {
+                          setRatingSubmitted(true);
+                        }
+                      }}
+                      data-testid="button-submit-rating"
+                    >
+                      {language === "ar" ? "إرسال التقييم" : "Submit Rating"}
+                    </Button>
+                    <button
+                      className="w-full text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                      onClick={() => setRatingSubmitted(true)}
+                    >
+                      {language === "ar" ? "تخطي" : "Skip"}
+                    </button>
+                  </>
+                )}
+              </CardContent>
+            </Card>
           </div>
         )}
       </div>

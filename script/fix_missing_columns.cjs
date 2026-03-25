@@ -22,6 +22,11 @@ async function main() {
     try { await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id TEXT`); } catch(e) { console.error('order_items.variant_id error:', e.message); }
     try { await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS customizations JSONB DEFAULT '[]'`); } catch(e) { console.error('order_items.customizations error:', e.message); }
 
+    // Fix RECIPES table
+    try { await pool.query(`ALTER TABLE recipes ADD COLUMN IF NOT EXISTS variant_id TEXT`); } catch(e) { console.error('recipes.variant_id error:', e.message); }
+    try { await pool.query(`ALTER TABLE recipes ADD COLUMN IF NOT EXISTS customization_option_id TEXT`); } catch(e) { console.error('recipes.customization_option_id error:', e.message); }
+
+
     console.log('✓ Applied schema fixes');
   } catch(e) {
     console.log('Critical error:', e.message);

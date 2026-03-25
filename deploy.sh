@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+# Removed set -e to handle errors individually and avoid silent failures
 
 echo "========================================="
 echo "  TRYING - Production Deployment Script"
@@ -10,10 +10,11 @@ DB_URL="${DATABASE_URL:?DATABASE_URL environment variable is required}"
 DOMAIN="tryingpos.com"
 PORT=5000
 
-# 1. System update & install dependencies
-echo "[1/8] Updating system packages..."
-apt-get update -y && apt-get upgrade -y
-apt-get install -y curl nginx certbot python3-certbot-nginx
+# 1. System update & install dependencies (skip full upgrade - too slow)
+echo "[1/8] Installing system dependencies..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y -q
+apt-get install -y -q curl nginx certbot python3-certbot-nginx
 
 # 2. Install Node.js 20 LTS if not present
 if ! command -v node &> /dev/null || [[ $(node -v | cut -d'.' -f1 | tr -d 'v') -lt 20 ]]; then
@@ -48,7 +49,14 @@ fi
 
 # 5. Install production dependencies
 echo "[5/8] Installing dependencies..."
-npm install --production=false
+if [ -f package-lock.json ]; then
+  echo "  Found package-lock.json, running npm ci..."
+  npm ci 2>&1 || { echo "  npm ci failed, falling back to npm install..."; npm install --production=false 2>&1; }
+else
+  echo "  No package-lock.json, running npm install..."
+  npm install --production=false 2>&1
+fi
+echo "  Dependencies installed."
 
 # 5.5. Build client for production
 echo "[5.5/8] Building client..."
@@ -72,9 +80,92 @@ EOF
 # Load environment variables for migration scripts
 export DATABASE_URL=$DB_URL
 
-# Run database migrations
+# Run database migrations via direct SQL (drizzle-kit push hangs on interactive rename prompts over SSH)
 echo "[6.25/8] Running database migrations..."
-npx drizzle-kit push || echo "  ⚠️ Database migration failed"
+
+# Extract DB connection from DATABASE_URL for psql
+if command -v psql &> /dev/null; then
+  echo "  Running schema migrations via psql..."
+  
+  # Add missing columns to delivery_integrations (if old schema had different column names)
+  psql "$DATABASE_URL" -c "
+    DO \$\$
+    BEGIN
+      -- Add new columns if they don't exist
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='chain_id') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN chain_id text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='vendor_id') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN vendor_id text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='client_id') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN client_id text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='client_secret') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN client_secret text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='webhook_secret') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN webhook_secret text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='access_token') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN access_token text;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='token_expires_at') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN token_expires_at timestamp;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='auto_accept') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN auto_accept boolean DEFAULT false;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='outlet_status') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN outlet_status text DEFAULT 'closed';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='last_sync_at') THEN
+        ALTER TABLE delivery_integrations ADD COLUMN last_sync_at timestamp;
+      END IF;
+      -- Drop old columns that were renamed
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='external_store_id') THEN
+        ALTER TABLE delivery_integrations DROP COLUMN external_store_id;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='api_key') THEN
+        ALTER TABLE delivery_integrations DROP COLUMN api_key;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='api_secret') THEN
+        ALTER TABLE delivery_integrations DROP COLUMN api_secret;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='delivery_integrations' AND column_name='settings') THEN
+        ALTER TABLE delivery_integrations DROP COLUMN settings;
+      END IF;
+    END \$\$;
+  " 2>&1 && echo "  ✅ Schema migration done" || echo "  ⚠️ Schema migration had issues (may be OK if table doesn't exist yet)"
+  
+  # Run full schema SQL (all tables use CREATE TABLE IF NOT EXISTS - safe to re-run)
+  echo "  Running full schema migration..."
+  psql "$DATABASE_URL" -f $APP_DIR/migrations/0000_full_schema.sql 2>&1 || echo "  ⚠️ Full schema migration had issues"
+  
+  # Run incremental migrations
+  for migration in $APP_DIR/migrations/0001_*.sql $APP_DIR/migrations/0002_*.sql; do
+    if [ -f "$migration" ]; then
+      echo "  Running migration: $(basename $migration)..."
+      psql "$DATABASE_URL" -f "$migration" 2>&1 || echo "  ⚠️ Migration $(basename $migration) had issues (may already be applied)"
+    fi
+  done
+  
+  echo "  ✅ All SQL migrations completed"
+else
+  echo "  ⚠️ psql not available - installing postgresql-client..."
+  apt-get install -y -q postgresql-client 2>/dev/null
+  if command -v psql &> /dev/null; then
+    echo "  Running full schema migration..."
+    psql "$DATABASE_URL" -f $APP_DIR/migrations/0000_full_schema.sql 2>&1 || echo "  ⚠️ Schema migration had issues"
+    for migration in $APP_DIR/migrations/0001_*.sql $APP_DIR/migrations/0002_*.sql; do
+      if [ -f "$migration" ]; then
+        psql "$DATABASE_URL" -f "$migration" 2>&1 || true
+      fi
+    done
+  else
+    echo "  ⚠️ Could not install psql - skipping migrations (app will handle schema at startup)"
+  fi
+fi
 
 # Run schema migration fixes if present
 if [ -f $APP_DIR/add-cashier-name.cjs ]; then

@@ -269,22 +269,7 @@ export default function PublicLandingPage() {
             </Card>
           )}
 
-          {categories && categories.length > 0 && (
-            <div className="pt-2">
-              <h3 className="text-sm font-semibold text-muted-foreground mb-3 px-1">{t("ourMenu")}</h3>
-              <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1 scrollbar-hide">
-                {categories.map((cat: any) => (
-                  <button
-                    key={cat.id}
-                    onClick={() => setLocation(`/m/${restaurantId}/menu${branchQuery}`)}
-                    className="flex-shrink-0 px-4 py-2.5 bg-white dark:bg-gray-800 rounded-xl shadow-sm text-sm font-medium hover:shadow-md transition-all hover:scale-105 border border-gray-100 dark:border-gray-700"
-                  >
-                    {getLocalizedName(cat.nameEn, cat.nameAr)}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+
 
           {(restaurant.phone || restaurant.whatsapp || restaurant.address || restaurant.socialInstagram || restaurant.socialTwitter || restaurant.socialTiktok || restaurant.socialSnapchat || restaurant.socialFacebook) && (
             <Card className="rounded-xl border-0 shadow-sm bg-white dark:bg-gray-800">

@@ -1,4 +1,14 @@
 import { useState } from "react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Search, Edit2, Trash2, FolderOpen, UtensilsCrossed, Flame, AlertTriangle, Coffee, Footprints, Wheat, Milk, Fish, Egg, Leaf, Star, Sparkles, Settings2, ChevronDown, Package, Beaker, X } from "lucide-react";
 import { useForm } from "react-hook-form";
@@ -1274,6 +1284,7 @@ export default function MenuPage() {
   const [itemDialogOpen, setItemDialogOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | undefined>();
   const [editingItem, setEditingItem] = useState<MenuItem | undefined>();
+  const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'item' | 'category'; id: string; name: string } | null>(null);
 
   const { data: categories, isLoading: categoriesLoading } = useQuery<Category[]>({
     queryKey: ["/api/categories"],
@@ -1567,7 +1578,7 @@ export default function MenuPage() {
                         <Button 
                           variant="ghost" 
                           size="icon"
-                          onClick={() => { if (window.confirm('هل أنت متأكد من حذف هذا العنصر؟')) deleteItemMutation.mutate(item.id); }}
+                          onClick={() => setDeleteConfirm({ type: 'item', id: item.id, name: getLocalizedName(item.nameEn, item.nameAr) })}
                           data-testid={`button-delete-item-${item.id}`}
                         >
                           <Trash2 className="h-4 w-4 text-destructive" />
@@ -1639,7 +1650,7 @@ export default function MenuPage() {
                           <Button 
                             variant="ghost" 
                             size="icon"
-                            onClick={() => { if (window.confirm('هل أنت متأكد من حذف هذا التصنيف؟')) deleteCategoryMutation.mutate(category.id); }}
+                            onClick={() => setDeleteConfirm({ type: 'category', id: category.id, name: getLocalizedName(category.nameEn, category.nameAr) })}
                             data-testid={`button-delete-category-${category.id}`}
                           >
                             <Trash2 className="h-4 w-4 text-destructive" />
@@ -1659,6 +1670,34 @@ export default function MenuPage() {
           <CustomizationsSection language={language} />
         </TabsContent>
       </Tabs>
+
+      {/* Delete confirmation dialog */}
+      <AlertDialog open={!!deleteConfirm} onOpenChange={(open) => { if (!open) setDeleteConfirm(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>تأكيد الحذف / Confirm Delete</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteConfirm?.type === 'item'
+                ? `هل أنت متأكد من حذف "${deleteConfirm.name}"؟ لا يمكن التراجع عن هذا الإجراء.`
+                : `هل أنت متأكد من حذف تصنيف "${deleteConfirm?.name}"؟ لا يمكن التراجع عن هذا الإجراء.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setDeleteConfirm(null)}>إلغاء / Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (!deleteConfirm) return;
+                if (deleteConfirm.type === 'item') deleteItemMutation.mutate(deleteConfirm.id);
+                else deleteCategoryMutation.mutate(deleteConfirm.id);
+                setDeleteConfirm(null);
+              }}
+            >
+              حذف / Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -1805,7 +1844,6 @@ function CustomizationsSection({ language }: { language: string }) {
     mutationFn: async (id: string) => {
       const response = await fetch(`/api/variants/${id}`, { method: "DELETE" });
       if (!response.ok) throw new Error("Failed to delete");
-      return response.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/menu-items", selectedMenuItem, "variants"] });

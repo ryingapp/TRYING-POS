@@ -36,6 +36,7 @@ export default function LoginPage() {
     loginError: { en: "Login failed. Please check your credentials.", ar: "فشل تسجيل الدخول. يرجى التحقق من بياناتك." },
     accountDisabled: { en: "Your account has been suspended. Please contact the administrator.", ar: "تم تعطيل حسابك. يرجى التواصل مع المسؤول." },
     restaurantInactive: { en: "Your restaurant subscription is inactive. Please contact the platform administrator.", ar: "اشتراك مطعمك غير نشط. يرجى التواصل مع مسؤول المنصة." },
+    rateLimited: { en: "Too many login attempts. Please wait 10 minutes before trying again.", ar: "محاولات دخول كثيرة. يرجى الانتظار 10 دقائق قبل المحاولة مرة أخرى." },
   };
 
   const tx = (key: keyof typeof texts) => texts[key][language];
@@ -73,7 +74,9 @@ export default function LoginPage() {
     } catch (error: any) {
       const msg = error?.message || "";
       let errorMsg = tx("loginError");
-      if (msg.includes("disabled") || msg.includes("Account is disabled")) {
+      if (msg.includes("Too many") || msg.includes("rate limit") || msg.includes("429")) {
+        errorMsg = tx("rateLimited");
+      } else if (msg.includes("disabled") || msg.includes("Account is disabled")) {
         errorMsg = tx("accountDisabled");
       } else if (msg.includes("inactive") || msg.includes("subscription")) {
         errorMsg = tx("restaurantInactive");
@@ -105,7 +108,9 @@ export default function LoginPage() {
 
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
-          <div className="w-48 h-20 mx-auto mb-2 flex items-center justify-center"><div className="w-16 h-16 rounded-xl bg-primary flex items-center justify-center text-primary-foreground font-bold text-3xl">T</div></div>
+          <div className="w-64 h-24 mx-auto mb-2 flex items-center justify-center">
+            <img src="/logo.png" alt="Trying" className="max-h-20 max-w-full object-contain drop-shadow-md" />
+          </div>
         </div>
 
         <Card>

@@ -52,8 +52,10 @@ export async function apiRequest(
     credentials: "include",
   });
 
-  // Handle rate limiting with exponential backoff
-  if (res.status === 429 && retries > 0) {
+  // Never retry on 429 for mutating requests (POST/PUT/PATCH/DELETE)
+  // Retrying would burn through rate limit slots and make things worse
+  const isMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
+  if (res.status === 429 && retries > 0 && !isMutation) {
     const delay = Math.pow(2, 3 - retries) * 1000; // 1s, 2s, 4s
     await new Promise(resolve => setTimeout(resolve, delay));
     return apiRequest(method, url, data, retries - 1);

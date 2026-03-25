@@ -622,7 +622,7 @@ export default function POSPage() {
         return;
       }
     }
-    if (paymentMethod === "tap_to_pay" || paymentMethod === "card_machine") {
+    if (paymentMethod === "tap_to_pay") {
       setPaymentConfirmOpen(true);
       return;
     }
@@ -635,10 +635,8 @@ export default function POSPage() {
   };
 
   const paymentMethodOptions = [
-    { id: "cash", icon: Banknote, label: t("cash") },
-    { id: "tap_to_pay", icon: Nfc, label: t("tapToPay") },
-    { id: "card_machine", icon: CreditCard, label: language === "ar" ? "جهاز شبكة" : "Card Machine" },
-    { id: "split", icon: Wallet, label: t("splitPayment") },
+    { id: "cash", icon: Banknote, label: language === "ar" ? "كاش" : "Cash" },
+    { id: "tap_to_pay", icon: CreditCard, label: language === "ar" ? "بطاقة" : "Card" },
   ];
 
   return (
@@ -1133,7 +1131,7 @@ export default function POSPage() {
               <>
               <div className="space-y-2">
                 <Label>{t("paymentMethod")}</Label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   {paymentMethodOptions.map(({ id, icon: Icon, label }) => (
                     <Button
                       key={id}
@@ -1553,12 +1551,10 @@ export default function POSPage() {
 
               <div className="space-y-2">
                 <Label>{language === "ar" ? "طريقة الدفع" : "Payment Method"}</Label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   {[
                     { id: "cash", icon: Banknote, label: language === "ar" ? "كاش" : "Cash" },
-                    { id: "tap_to_pay", icon: Nfc, label: language === "ar" ? "شبكة" : "Card" },
-                    { id: "card_machine", icon: CreditCard, label: language === "ar" ? "جهاز شبكة" : "Card Machine" },
-                    { id: "split", icon: Wallet, label: language === "ar" ? "تقسيم" : "Split" },
+                    { id: "tap_to_pay", icon: CreditCard, label: language === "ar" ? "بطاقة" : "Card" },
                   ].map(({ id, icon: Icon, label }) => (
                     <Button
                       key={id}

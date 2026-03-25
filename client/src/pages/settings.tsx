@@ -73,6 +73,7 @@ const generalFormSchema = z.object({
   serviceDelivery: z.boolean().optional(),
   serviceTableBooking: z.boolean().optional(),
   serviceQueue: z.boolean().optional(),
+  allowCashOnPublicQR: z.boolean().optional(),
   socialInstagram: z.string().optional(),
   socialTwitter: z.string().optional(),
   socialTiktok: z.string().optional(),
@@ -239,6 +240,7 @@ export default function SettingsPage() {
       serviceDelivery: restaurant?.serviceDelivery ?? true,
       serviceTableBooking: restaurant?.serviceTableBooking ?? false,
       serviceQueue: restaurant?.serviceQueue ?? false,
+      allowCashOnPublicQR: (restaurant as any)?.allowCashOnPublicQR ?? true,
       socialInstagram: (restaurant as any)?.socialInstagram || "",
       socialTwitter: (restaurant as any)?.socialTwitter || "",
       socialTiktok: (restaurant as any)?.socialTiktok || "",
@@ -1106,6 +1108,18 @@ export default function SettingsPage() {
                                 <Switch checked={field.value} onCheckedChange={field.onChange} data-testid="switch-queue" />
                               </FormControl>
                               <FormLabel className="!mt-0">{t("serviceQueue")}</FormLabel>
+                            </FormItem>
+                          )}
+                        />
+                        <FormField
+                          control={generalForm.control}
+                          name="allowCashOnPublicQR"
+                          render={({ field }) => (
+                            <FormItem className="flex items-center gap-2">
+                              <FormControl>
+                                <Switch checked={field.value} onCheckedChange={field.onChange} data-testid="switch-cash-qr" />
+                              </FormControl>
+                              <FormLabel className="!mt-0">{t("allowCashOnPublicQR") || "الدفع نقدي من QR العام"}</FormLabel>
                             </FormItem>
                           )}
                         />

@@ -36,12 +36,14 @@ import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/lib/i18n";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { InvoiceModal } from "@/components/invoice-modal";
+import { useBranch } from "@/lib/branch";
 import type { Invoice, Restaurant } from "@shared/schema";
 
 export default function InvoiceArchivePage() {
   const { language, direction } = useLanguage();
   const { toast } = useToast();
   const isRtl = direction === "rtl";
+  const { selectedBranchId } = useBranch();
 
   // Filters
   const [invoiceNumber, setInvoiceNumber] = useState("");
@@ -87,6 +89,7 @@ export default function InvoiceArchivePage() {
   // Build search params
   const buildSearchParams = () => {
     const params = new URLSearchParams();
+    if (selectedBranchId) params.set("branch", selectedBranchId);
     if (invoiceNumber) params.set("invoiceNumber", invoiceNumber);
     if (customerPhone) params.set("customerPhone", customerPhone);
     if (startDate) params.set("startDate", startDate);
@@ -98,7 +101,7 @@ export default function InvoiceArchivePage() {
   };
 
   const { data: invoices = [], isLoading } = useQuery<Invoice[]>({
-    queryKey: ["/api/invoices/search", invoiceNumber, customerPhone, startDate, endDate, paymentMethod, statusFilter, typeFilter],
+    queryKey: ["/api/invoices/search", selectedBranchId, invoiceNumber, customerPhone, startDate, endDate, paymentMethod, statusFilter, typeFilter],
     queryFn: async () => {
       const params = buildSearchParams();
       const res = await apiRequest("GET", `/api/invoices/search?${params}`);

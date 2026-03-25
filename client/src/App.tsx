@@ -102,12 +102,11 @@ function AdminLayout() {
 function LoadingSplash() {
   return (
     <div className="fixed inset-0 flex flex-col items-center justify-center bg-background z-50">
-      <div className="flex flex-col items-center gap-6 animate-pulse">
-        <div className="w-24 h-24 rounded-2xl bg-primary flex items-center justify-center shadow-lg">
-          <span className="text-4xl font-black text-primary-foreground tracking-tighter">T</span>
+      <div className="flex flex-col items-center gap-6">
+        <div className="flex items-center justify-center">
+          <img src="/logo.png" alt="Trying" className="h-20 object-contain drop-shadow-lg" />
         </div>
         <div className="flex flex-col items-center gap-1">
-          <span className="text-2xl font-bold text-foreground tracking-wide">TRYING</span>
           <span className="text-sm text-muted-foreground">منصة إدارة المطاعم</span>
         </div>
         <div className="flex gap-1.5 mt-2">

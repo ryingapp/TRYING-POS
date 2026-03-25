@@ -34,6 +34,7 @@ export const restaurants = pgTable("restaurants", {
   serviceQueue: boolean("service_queue").default(false),
   serviceKitchenScreen: boolean("service_kitchen_screen").default(true),
   serviceQuickOrder: boolean("service_quick_order").default(false),
+  allowCashOnPublicQR: boolean("allow_cash_on_public_qr").default(true),
   // Reservation settings
   reservationDuration: integer("reservation_duration").default(90), // minutes
   reservationDepositAmount: decimal("reservation_deposit_amount", { precision: 10, scale: 2 }).default("20.00"),

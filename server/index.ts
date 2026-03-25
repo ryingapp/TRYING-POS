@@ -5,6 +5,8 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { seedDatabase } from "./seed";
 import { wsManager } from "./websocket";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -120,6 +122,75 @@ app.use((req, res, next) => {
   
   // Initialize WebSocket server
   wsManager.initialize(httpServer);
+
+  // ── Auto-complete "ready" orders after 1 hour ──────────────────────────
+  // Every 5 minutes: find orders stuck in 'ready' status for > 1 hour,
+  // mark them completed and free their table.
+  const AUTO_COMPLETE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  const AUTO_COMPLETE_AFTER_MS   = 60 * 60 * 1000; // 1 hour
+
+  async function autoCompleteReadyOrders() {
+    try {
+      const cutoff = new Date(Date.now() - AUTO_COMPLETE_AFTER_MS);
+      // Fetch all 'ready' orders whose updatedAt is older than the cutoff
+      const staleOrders = await db.execute(sql`
+        SELECT id, table_id, restaurant_id, branch_id
+        FROM orders
+        WHERE status = 'ready'
+          AND updated_at < ${cutoff}
+      `);
+
+      const rows = staleOrders.rows as Array<{
+        id: string;
+        table_id: string | null;
+        restaurant_id: string;
+        branch_id: string | null;
+      }>;
+
+      if (rows.length === 0) return;
+
+      log(`[AutoComplete] Auto-completing ${rows.length} stale ready order(s)`, "auto-complete");
+
+      for (const row of rows) {
+        try {
+          // Mark order as completed
+          await db.execute(sql`
+            UPDATE orders
+            SET status = 'completed', updated_at = NOW()
+            WHERE id = ${row.id}
+          `);
+
+          // Free the table if this was a dine_in order
+          if (row.table_id) {
+            await db.execute(sql`
+              UPDATE tables
+              SET status = 'available', updated_at = NOW()
+              WHERE id = ${row.table_id}
+            `);
+            try {
+              wsManager.notifyDataChanged(row.restaurant_id, "tables", "updated");
+            } catch {}
+          }
+
+          // Notify clients that this order changed
+          try {
+            wsManager.notifyDataChanged(row.restaurant_id, "orders", "updated");
+          } catch {}
+
+          log(`[AutoComplete] Order ${row.id} → completed (table freed: ${row.table_id ?? "none"})`, "auto-complete");
+        } catch (orderErr) {
+          console.error(`[AutoComplete] Failed to auto-complete order ${row.id}:`, orderErr);
+        }
+      }
+    } catch (err) {
+      console.error("[AutoComplete] Job error:", err);
+    }
+  }
+
+  // Run once on start (handles any orders that were already stale before restart)
+  autoCompleteReadyOrders();
+  setInterval(autoCompleteReadyOrders, AUTO_COMPLETE_INTERVAL_MS);
+  // ──────────────────────────────────────────────────────────────────────────
   
   // Seed database with initial data
   await seedDatabase();

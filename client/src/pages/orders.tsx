@@ -18,6 +18,14 @@ import {
   DialogFooter,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  Table as UITable,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Label } from "@/components/ui/label";
 import {
   Form,
@@ -290,6 +298,7 @@ export default function OrdersPage() {
   const [refundDialogOpen, setRefundDialogOpen] = useState(false);
   const [refundOrderId, setRefundOrderId] = useState<string | null>(null);
   const [refundReason, setRefundReason] = useState("");
+  const [refundItems, setRefundItems] = useState<any[]>([]);
   const [expandedDeliveryOrders, setExpandedDeliveryOrders] = useState<Set<string>>(new Set());
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -356,13 +365,26 @@ export default function OrdersPage() {
 
   // Refund mutation - finds the invoice for the order and refunds it
   const refundMutation = useMutation({
-    mutationFn: async ({ orderId, reason }: { orderId: string; reason: string }) => {
+    mutationFn: async ({ orderId, reason, items }: { orderId: string; reason: string; items?: any[] }) => {
       // First get the invoice for this order
       const res = await apiRequest("GET", `/api/orders/${orderId}/invoice`);
       const invoice = await res.json();
       if (!invoice || !invoice.id) throw new Error(language === "ar" ? "لم يتم العثور على فاتورة لهذا الطلب" : "No invoice found for this order");
+      
+      let payloadItems = undefined;
+      if (items && items.length > 0) {
+        const selected = items.filter((i: any) => i.selected);
+        if (selected.length > 0) {
+           payloadItems = selected.map((i: any) => ({
+             id: i.id,
+             menuItemId: i.menuItemId, // Optional but good to have
+             quantity: i.refundQty // Use refundQty as quantity
+           }));
+        }
+      }
+
       // Then refund the invoice
-      return apiRequest("POST", `/api/invoices/${invoice.id}/refund`, { reason });
+      return apiRequest("POST", `/api/invoices/${invoice.id}/refund`, { reason, items: payloadItems });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("/api/orders") });
@@ -371,6 +393,7 @@ export default function OrdersPage() {
       setRefundDialogOpen(false);
       setRefundReason("");
       setRefundOrderId(null);
+      setRefundItems([]);
     },
     onError: (error: any) => {
       toast({ title: language === "ar" ? "خطأ في الاسترجاع" : "Refund failed", description: error.message, variant: "destructive" });
@@ -788,7 +811,20 @@ export default function OrdersPage() {
                         className="w-full mt-2"
                         variant="outline"
                         size={cardSize === "compact" ? "sm" : "default"}
-                        onClick={() => { setRefundOrderId(order.id); setRefundDialogOpen(true); }}
+                        onClick={() => { 
+                           if ((order as any).items) {
+                              setRefundItems((order as any).items.map((i:any) => ({
+                                 ...i,
+                                 refundQty: i.quantity,
+                                 selected: false,
+                                 itemName: language === "ar" ? i.menuItem?.nameAr || i.itemName : i.menuItem?.nameEn || i.itemName
+                              })));
+                           } else {
+                              setRefundItems([]);
+                           }
+                           setRefundOrderId(order.id); 
+                           setRefundDialogOpen(true); 
+                        }}
                       >
                         <RotateCcw className="h-4 w-4 me-2 text-orange-500" />
                         {language === "ar" ? "استرجاع" : "Refund"}
@@ -1029,7 +1065,7 @@ export default function OrdersPage() {
 
       {/* Refund Dialog */}
       <Dialog open={refundDialogOpen} onOpenChange={(open) => { setRefundDialogOpen(open); if (!open) { setRefundReason(""); setRefundOrderId(null); } }}>
-        <DialogContent>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{language === "ar" ? "استرجاع الطلب" : "Refund Order"}</DialogTitle>
             <DialogDescription>
@@ -1038,7 +1074,69 @@ export default function OrdersPage() {
                 : "A credit note will be created and inventory will be returned automatically"}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+             {refundItems.length > 0 && (
+              <div className="border rounded-md">
+                 <UITable>
+                    <TableHeader>
+                       <TableRow>
+                          <TableHead className="w-[50px]">
+                            <input type="checkbox" 
+                               checked={refundItems.every(i => i.selected)}
+                               onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setRefundItems(refundItems.map(i => ({ ...i, selected: checked })));
+                               }}
+                               className="accent-primary h-4 w-4"
+                            />
+                          </TableHead>
+                          <TableHead className="text-right">{language === "ar" ? "المنتج" : "Item"}</TableHead>
+                          <TableHead className="w-[100px] text-center">{language === "ar" ? "الكمية" : "Qty"}</TableHead>
+                       </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                       {refundItems.map((item, idx) => (
+                          <TableRow key={idx}>
+                             <TableCell>
+                                <input type="checkbox" 
+                                   checked={item.selected}
+                                   onChange={(e) => {
+                                      const newItems = [...refundItems];
+                                      newItems[idx].selected = e.target.checked;
+                                      setRefundItems(newItems);
+                                   }}
+                                   className="accent-primary h-4 w-4"
+                                />
+                             </TableCell>
+                             <TableCell>{item.itemName}</TableCell>
+                             <TableCell>
+                                <div className="flex items-center gap-2 justify-center">
+                                   <Button variant="outline" size="icon" className="h-6 w-6" 
+                                      onClick={() => {
+                                         const newItems = [...refundItems];
+                                         if (newItems[idx].refundQty > 1) newItems[idx].refundQty--;
+                                         setRefundItems(newItems);
+                                      }}
+                                      disabled={!item.selected}
+                                   >-</Button>
+                                   <span className="w-8 text-center">{item.refundQty}</span>
+                                   <Button variant="outline" size="icon" className="h-6 w-6"
+                                      onClick={() => {
+                                         const newItems = [...refundItems];
+                                         if (newItems[idx].refundQty < item.quantity) newItems[idx].refundQty++;
+                                         setRefundItems(newItems);
+                                      }}
+                                      disabled={!item.selected}
+                                   >+</Button>
+                                </div>
+                             </TableCell>
+                          </TableRow>
+                       ))}
+                    </TableBody>
+                 </UITable>
+              </div>
+            )}
+          
             <div>
               <Label>{language === "ar" ? "سبب الاسترجاع" : "Refund Reason"}</Label>
               <Textarea
@@ -1047,6 +1145,13 @@ export default function OrdersPage() {
                 onChange={(e) => setRefundReason(e.target.value)}
               />
             </div>
+            
+             <div className="text-sm text-muted-foreground p-2 bg-muted rounded">
+               {refundItems.some(i => i.selected) 
+                  ? (language === "ar" ? `سيتم استرجاع ${refundItems.filter(i => i.selected).length} عناصر` : `Refunding ${refundItems.filter(i => i.selected).length} items`)
+                  : (language === "ar" ? "استرجاع كامل الفاتورة" : "Full Refund (All items)")
+               }
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRefundDialogOpen(false)}>
@@ -1054,7 +1159,11 @@ export default function OrdersPage() {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => refundOrderId && refundMutation.mutate({ orderId: refundOrderId, reason: refundReason })}
+              onClick={() => refundOrderId && refundMutation.mutate({ 
+                 orderId: refundOrderId, 
+                 reason: refundReason,
+                 items: refundItems.some(i => i.selected) ? refundItems : undefined 
+              })}
               disabled={refundMutation.isPending || !refundReason}
             >
               {refundMutation.isPending 
