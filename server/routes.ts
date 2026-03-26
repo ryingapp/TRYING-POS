@@ -8852,14 +8852,18 @@ export async function registerRoutes(
       }
 
       const today = new Date().toISOString().split('T')[0];
-      const data = insertDaySessionSchema.parse({
-        ...req.body,
-        restaurantId: await getRestaurantId(req),
+      // Build insert data manually to avoid Zod decimal type coercion issues
+      // (client sends openingBalance as number, Zod expects string for decimal columns)
+      const sessionData: any = {
+        restaurantId,
         branchId: branchId || undefined,
         date: today,
-      });
+        status: "open",
+        openingBalance: String(parseFloat(req.body.openingBalance) || 0),
+        notes: req.body.notes || undefined,
+      };
 
-      const session = await storage.openDaySession(data);
+      const session = await storage.openDaySession(sessionData);
 
       // Create notification
       await storage.createNotification({
