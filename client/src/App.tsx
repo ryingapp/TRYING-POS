@@ -101,18 +101,34 @@ function AdminLayout() {
 
 function LoadingSplash() {
   return (
-    <div className="fixed inset-0 flex flex-col items-center justify-center bg-background z-50">
-      <div className="flex flex-col items-center gap-6">
-        <div className="flex items-center justify-center">
-          <img src="/logo.png" alt="Trying" className="h-20 object-contain drop-shadow-lg" />
-        </div>
-        <div className="flex flex-col items-center gap-1">
-          <span className="text-sm text-muted-foreground">منصة إدارة المطاعم</span>
-        </div>
-        <div className="flex gap-1.5 mt-2">
-          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
-          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "150ms" }} />
-          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "300ms" }} />
+    <div className="fixed inset-0 flex flex-col items-center justify-center z-50" style={{ backgroundColor: "#ffffff" }}>
+      <div className="flex flex-col items-center gap-8">
+        {/* Trying Logo SVG */}
+        <svg width="280" height="100" viewBox="0 0 560 200" xmlns="http://www.w3.org/2000/svg">
+          {/* Top horizontal bar */}
+          <rect x="0" y="0" width="200" height="18" fill="#C9A84C" rx="2" />
+          <rect x="0" y="26" width="200" height="10" fill="#C9A84C" rx="1" />
+          {/* Left leg */}
+          <rect x="0" y="36" width="68" height="164" fill="#C9A84C" rx="2" />
+          {/* Right inner line (thin) */}
+          <rect x="82" y="36" width="12" height="130" fill="#C9A84C" rx="1" />
+          {/* U curve bottom */}
+          <path d="M68 170 Q68 200 100 200 Q132 200 132 170 L132 36 L144 36 L144 170 Q144 212 100 212 Q56 212 56 170 Z" fill="none" />
+          {/* Right outer leg */}
+          <rect x="132" y="36" width="68" height="164" fill="#C9A84C" rx="2" />
+          {/* U-bottom connector */}
+          <path d="M68 185 Q68 200 100 200 Q132 200 132 185" fill="none" stroke="#C9A84C" strokeWidth="18" strokeLinecap="round" />
+          {/* "Trying" text */}
+          <text x="228" y="155" fontFamily="Georgia, serif" fontWeight="700" fontSize="130" fill="#2D1B4E" letterSpacing="-2">Trying</text>
+          {/* ® symbol */}
+          <text x="527" y="68" fontFamily="Georgia, serif" fontWeight="400" fontSize="42" fill="#2D1B4E">®</text>
+        </svg>
+
+        {/* Loading dots */}
+        <div className="flex gap-2 mt-2">
+          <div className="w-2.5 h-2.5 rounded-full animate-bounce" style={{ backgroundColor: "#C9A84C", animationDelay: "0ms" }} />
+          <div className="w-2.5 h-2.5 rounded-full animate-bounce" style={{ backgroundColor: "#C9A84C", animationDelay: "150ms" }} />
+          <div className="w-2.5 h-2.5 rounded-full animate-bounce" style={{ backgroundColor: "#C9A84C", animationDelay: "300ms" }} />
         </div>
       </div>
     </div>
